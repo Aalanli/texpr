@@ -1,5 +1,5 @@
 # %%
-from typing import List, Optional, Callable, Tuple, Union
+from typing import Dict, List, Optional, Callable, Set, Tuple, Union
 from enum import Enum
 
 def valid_name(name: str) -> bool:
@@ -21,8 +21,8 @@ class Type:
     def __hash__(self):
         return id(self)
 
-    def __eq__(self, other: 'Type'):
-        return self is other
+    def __eq__(self, other):
+        return isinstance(other, Type) and self is other
     
     def __str__(self):
         raise NotImplementedError()
@@ -50,9 +50,9 @@ u8  = DType(8, 'u8')
 
 
 class TensorType(Type):
-    def __init__(self, dtype: DType, shape: Tuple[Union[int, 'Value']]):
+    def __init__(self, dtype: DType, shape: Tuple[Union['Value', int], ...]):
         self.dtype: DType = dtype
-        self.shape: Tuple['Value'] = shape
+        self.shape: Tuple[Union['Value', int], ...] = shape
     
     def __str__(self):
         return f'{self.dtype}[{",".join(map(str, self.shape))}]'
@@ -96,8 +96,8 @@ class Value:
     def __hash__(self):
         return hash(self.uid)
     
-    def __eq__(self, other: 'Value'):
-        return self.uid == other.uid
+    def __eq__(self, other):
+        return isinstance(other, Value) and self.uid == other.uid
     
     def __str__(self):
         if self.name is None:
@@ -106,18 +106,31 @@ class Value:
             return f'%{self.name}{self.uid}'
 
 
+AttrTy = Union[int, float, bool, str, Tuple['AttrTy', ...], Dict[str, 'AttrTy']]        
+
+class Attr:
+    def __init__(self, **attrs: Dict[str, AttrTy]):
+        assert len(attrs) > 0
+        self.attrs = attrs
+    
 class Operation:
     def __init__(self, name: str, blocks: list['Block'], args: list['Value'], ret: list['Value']):
         self.name: str = name
         self.blocks: list['Block'] = blocks
         self.args: list['Value'] = args
         self.ret: list['Value'] = ret
+    
+    def lower_attr(self) -> Optional[Attr]:
+        return None
 
 
 class Block:
-    def __init__(self, args: list['Value'], ops: list['Operation']):
+    def __init__(self, args: list['Value'], ops: list['Operation'], label: Optional[str] = None):
         self.args: list['Value'] = args
         self.ops: list['Operation'] = ops
+        self.label = label
+        if label is not None:
+            assert label.isidentifier()
 
     
 
@@ -149,6 +162,8 @@ class ConstantOp(Operation):
         elif isinstance(py_constant, float):
             ty = f32
         super().__init__('constant', [], [], [Value(ty)])
+    def lower_attr(self) -> Attr | None:
+        return Attr(val=self.py_constant)
 
 class YieldOp(Operation):
     def __init__(self, val: Value):
@@ -171,15 +186,15 @@ class IfThenElseOp(Operation):
         super().__init__('if', [], [cond, true_value, false_value], [ret])
 
 class GridComputeOp(Operation):
-    def __init__(self, shape: Tuple['Value'], block: Block, ret: Value):
-        super().__init__('grid_compute', [block], shape, [ret])
+    def __init__(self, shape: Tuple['Value',...], block: Block, ret: Value):
+        super().__init__('grid_compute', [block], list(shape), [ret])
 
 class GridReduceOp(Operation):
-    def __init__(self, reduction: ReduceOperations, shape: Tuple['Value'], block: Block, ret: Value):
-        super().__init__('grid_reduce', [block], shape, [ret])
+    def __init__(self, reduction: ReduceOperations, shape: Tuple['Value',...], block: Block, ret: Value):
+        super().__init__('grid_reduce', [block], list(shape), [ret])
 
 class TensorIndexOp(Operation):
-    def __init__(self, tensor: Value, indices: Tuple['Value'], ret: Value):
+    def __init__(self, tensor: Value, indices: Tuple['Value', ...], ret: Value):
         super().__init__('index', [], [tensor, *indices], [ret])
 
 class IRFunctionOp(Operation):
@@ -195,3 +210,100 @@ class IRModuleOp(Operation):
         super().__init__('module', [], [], [])
         self.ir_functions = functions
 
+
+# IR := op
+# op := [(value | '(' value *(',' value) ')') '='] op_name arg_list [attr] [block_list]
+# op_name := IDENTIFIER
+# attr := '{|' kv_value *(',' kv_value) '|}'
+# kv_value := STRING ':' json
+# json := INT | FLOAT | STRING | BOOL | dict | list
+# dict := '{' kv_value *(',' kv_value) '}'
+# list := '[' [json, *(',' json)] ']'
+# arg_list := '(' ?(value) ')'
+# block_list := '{' ?(block) '}'
+# block := [label] '|' value *(',' value) '|' '{' *op '}'
+# label := IDENTIFIER
+# value := '%' IDENTIFIER ':' TYPE
+
+class Line:
+    def __init__(self, s: str):
+        assert '\n' not in s
+        self.line = s
+    
+    def indent(self) -> 'Line':
+        return Line('  ' + self.line)
+
+class ValueNamer:
+    def __init__(self) -> None:
+        self.names: Dict[Value, str] = {}
+        self.counter = 0
+        self.used_names: Set[str] = set()
+    
+    def name(self, v: Value) -> str:
+        if v in self.names:
+            return self.names[v]
+        else:
+            if v.name is not None:
+                name = v.name
+                idx = 0
+                while name + str(idx) in self.used_names:
+                    idx += 1
+                name = '%' + name + str(idx)
+            else:
+                name = f'%{self.counter}'
+            name = name + ': ' + str(v.type)
+            self.counter += 1
+            self.names[v] = name
+            return name
+
+def dump_ir(ir: Operation):
+    namer = ValueNamer()
+
+    def dump_attr_ty(attr: AttrTy) -> str:
+        if isinstance(attr, (int, float, bool, str)):
+            return str(attr)
+        elif isinstance(attr, tuple):
+            return '[' + ', '.join(map(dump_attr_ty, attr)) + ']'
+        elif isinstance(attr, dict):
+            kv = [k + ': ' + dump_attr_ty(v) for k, v in attr.items()]
+            return '{' + ', '.join(kv) + '}'
+        else:
+            raise TypeError()
+    
+    def dump_attr(attr: Attr) -> str:
+        return '{|' + ' ,'.join([k + ': ' + dump_attr_ty(v) for k, v in attr.attrs.items()]) + '|}'
+    
+    def dump_op(ir: Operation) -> List[Line]:
+        arg = ', '.join(map(namer.name, ir.args))
+        if len(ir.ret) > 0:
+            ret = ', '.join(map(namer.name, ir.ret))
+            if len(ir.ret) > 1:
+                ret = '(' + ret + ')'
+            header = Line(ret + ' = ' + ir.name + '(' + arg + ')')
+        else:
+            header = Line(ir.name + '(' + arg + ')')
+        lines = [header]
+        attr = ir.lower_attr()
+        if attr is not None:
+            line = ' ' + dump_attr(attr)
+            lines[-1].line += line
+        if len(ir.blocks) > 0:
+            if len(lines[-1].line) > 50:
+                lines.append(Line('{'))
+            else:
+                lines[-1].line += ' {'
+            for bk in ir.blocks:
+                lines.extend([l.indent() for l in dump_block(bk)])
+            lines.append(Line('}'))
+        return lines
+
+    def dump_block(ir: Block) -> List[Line]:
+        label = '' if ir.label is None else ir.label + ' '
+        header = Line(label + '|' + ', '.join(map(namer.name, ir.args)) + '| {')
+        lines = [header]
+        for op in ir.ops:
+            lines.extend([l.indent() for l in dump_op(op)])
+        lines.append(Line('}'))
+        return lines
+
+    return '\n'.join([l.line for l in dump_op(ir)])

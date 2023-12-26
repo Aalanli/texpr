@@ -3,14 +3,14 @@ from typing import List, Tuple, Callable, Dict, Optional, Union
 import ir
 from ir import Type
 
+ValidExpr = Union['Expr', int, float, bool, tuple['ValidExpr']]
 
 class Expr:
     """
     An Expr could also be any python value that ir.is_base_value returns True.
     """
-    ValidExpr = Union['Expr', int, float, bool, str, tuple['ValidExpr']]
 
-    def __init__(self, op_code: str, args: tuple[ValidExpr]):
+    def __init__(self, op_code: str, args: tuple[ValidExpr,...]):
         self.op_code = op_code
         self.args = args
 
@@ -90,7 +90,7 @@ class Variable(Expr):
         return id(self)
 
 class GridCompute(Expr):
-    def __init__(self, shape: tuple['Expr'], f: Callable):
+    def __init__(self, shape: tuple[ValidExpr, ...], f: Callable):
         super().__init__('grid_compute', shape)
         self.shape = shape
         self.bargs = [Variable(ir.i32, f'i{i}') for i in range(len(shape))]
@@ -103,7 +103,7 @@ class GridCompute(Expr):
         ) + '{\n ' + str(self.expr) + '\n}'
 
 class GridReduce(Expr):
-    def __init__(self, shape: tuple['Expr'], op: ir.ReduceOperations, f: Callable):
+    def __init__(self, shape: Tuple[ValidExpr,...], op: ir.ReduceOperations, f: Callable):
         super().__init__('grid_reduce', shape)
         self.shape = shape
         self.bargs = [Variable(ir.i32, f'i{i}') for i in range(len(shape))]
@@ -124,11 +124,11 @@ def var(type: ir.Type, name: Optional[str] = None) -> Variable:
 def ivar(name: Optional[str] = None) -> Variable:
     return Variable(ir.i32, name)
 
-def tensor(shape: Tuple[Union[int, Variable]], dtype: ir.DType, name: Optional[str] = None) -> Variable:
-    new_shape = []
+def tensor(shape: Tuple[Union[int, Variable],...], dtype: ir.DType, name: Optional[str] = None) -> Variable:
+    new_shape: List[Union[int, ir.Value]] = []
     for s in shape:
         if isinstance(s, int):
-            new_shape.append(int)
+            new_shape.append(s)
         elif isinstance(s, Variable):
             if s in _var2value:
                 new_shape.append(_var2value[s])
@@ -136,13 +136,13 @@ def tensor(shape: Tuple[Union[int, Variable]], dtype: ir.DType, name: Optional[s
                 val = ir.Value(ir.i32, s.name)
                 _var2value[s] = val
                 new_shape.append(val)
-    tensor_ty = ir.TensorType(dtype, new_shape)
+    tensor_ty = ir.TensorType(dtype, tuple(new_shape))
     return var(tensor_ty, name)
 
-def grid_compute(shape: Tuple[Union[int, Variable]], f: Callable) -> GridCompute:
+def grid_compute(shape: Tuple[Union[int, Variable],...], f: Callable) -> GridCompute:
     return GridCompute(shape, f)
 
-def reduce_compute(shape: Tuple[Union[int, Variable]], f: Callable, op: ir.ReduceOperations = ir.ReduceOperations.Sum) -> GridReduce:
+def reduce_compute(shape: Tuple[Union[int, Variable],...], f: Callable, op: ir.ReduceOperations = ir.ReduceOperations.Sum) -> GridReduce:
     return GridReduce(shape, op, f)
 
 def shape_of(tensor: Expr, index: int):
@@ -174,11 +174,12 @@ class ExprVisitor:
             raise RuntimeError("cannot fetch var {}".format(var))
         return self.var_table[var]
     
-    def visit(self, x: Expr) -> ir.Value:
+    def visit(self, x: ValidExpr) -> ir.Value:
         if isinstance(x, (int, bool, float)):
             op = ir.ConstantOp(x)
             self.append_op(op)
             return op.ret[0]
+        assert isinstance(x, Expr)
         vname = 'visit_' + x.op_code
         if hasattr(self, vname):
             f = getattr(self, vname)
@@ -308,18 +309,24 @@ class ExprVisitor:
     def visit_shape_of(self, x: Expr):
         res = self.visit(x.args[0])
         assert isinstance(res.type, ir.TensorType)
-        return res.type.shape[x.args[1]]
+        assert isinstance(x.args[1], int)
+        sh = res.type.shape[x.args[1]]
+        if isinstance(sh, int):
+            op = ir.ConstantOp(sh)
+            self.append_op(op)
+            sh = op.ret[0]
+        return sh
     
 
 def trace_function(args: List[Variable], root: Expr, name: str) -> ir.IRFunctionOp:
     visitor = ExprVisitor()
-    args = [visitor.register_var(a) for a in args]
+    vargs = [visitor.register_var(a) for a in args]
     res = visitor.visit(root)
     assert isinstance(res, ir.Value)
 
     body = visitor.pop_block()
     body.append(ir.YieldOp(res))
-    block = ir.Block(args, body)
+    block = ir.Block(vargs, body)
     op = ir.IRFunctionOp(block, name)
     return op
 
@@ -335,3 +342,5 @@ C = grid_compute((shape_of(A, 0), shape_of(B, 1)),
                                              lambda k: A[i, k] * B[k, j]))
 print(C)
 fn = trace_function([A, B], C, 'test')
+
+print(ir.dump_ir(fn))
