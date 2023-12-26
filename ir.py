@@ -1,5 +1,5 @@
 # %%
-from typing import Optional, Callable
+from typing import List, Optional, Callable, Tuple, Union
 from enum import Enum
 
 def valid_name(name: str) -> bool:
@@ -27,10 +27,6 @@ class Type:
     def __str__(self):
         raise NotImplementedError()
 
-class HoleType(Type):
-    def __str__(self):
-        return 'hole'
-
 class DType(Type):
     def __init__(self, nbits: int, name: str):
         self.name: str = name
@@ -39,7 +35,6 @@ class DType(Type):
     def __str__(self):
         return self.name
 
-hole = HoleType()
 f64 = DType(64, 'f64')
 f32 = DType(32, 'f32')
 f16 = DType(16, 'f16')
@@ -55,22 +50,47 @@ u8  = DType(8, 'u8')
 
 
 class TensorType(Type):
-    def __init__(self, dtype: DType, shape: tuple['Value']):
+    def __init__(self, dtype: DType, shape: Tuple[Union[int, 'Value']]):
         self.dtype: DType = dtype
-        self.shape: tuple['Value'] = shape
+        self.shape: Tuple['Value'] = shape
     
     def __str__(self):
         return f'{self.dtype}[{",".join(map(str, self.shape))}]'
 
+class FunctionType(Type):
+    def __init__(self, args: List[Type], ret: List[Type]):
+        self.args = args
+        self.ret = ret
+    
+    def __str__(self):
+        header = '(' + ', '.join(map(str, self.args)) + ') -> '
+        if len(self.ret) == 0:
+            header += '()'
+        elif len(self.ret) == 1:
+            header += str(self.ret[0])
+        else:
+            header += '(' + ', '.join(map(str, self.ret)) + ')'
+        return header
+    
+    def __eq__(self, other):
+        return isinstance(other, FunctionType) and self.args == other.args and self.ret == other.ret
+    
+    def __hash__(self):
+        return hash(('fn_ty', tuple(self.args), tuple(self.ret)))
+ 
 
 class Value:
     _uid: int = 0
     def __init__(self, type: Type, name: Optional[str] = None):
+        assert isinstance(type, Type)
         self.type: Type = type
         self.uid: int = Value._uid
         self.name: Optional[str] = name
         if name is not None:
-            assert valid_name(name), f'invalid name: {name}'
+            assert len(name) > 0
+            if name[0] != '%':
+                assert valid_name(name), f'invalid name: {name}'
+
         Value._uid += 1
     
     def __hash__(self):
@@ -118,11 +138,25 @@ class ReduceOperations(Enum):
     Min = 1
     Max = 2
 
+class ConstantOp(Operation):
+    def __init__(self, py_constant):
+        assert isinstance(py_constant, (int, bool, float))
+        self.py_constant = py_constant
+        if isinstance(py_constant, int):
+            ty = i32
+        elif isinstance(py_constant, bool):
+            ty = i1
+        elif isinstance(py_constant, float):
+            ty = f32
+        super().__init__('constant', [], [], [Value(ty)])
 
+class YieldOp(Operation):
+    def __init__(self, val: Value):
+        super().__init__('yield', [], [val], [])
 
 class BinaryOp(Operation):
     def __init__(self, op: BinaryOpCodes, lhs: Value, rhs: Value, ret: Value):
-        super().__init__(op.name, [], [lhs, rhs], [ret])
+        super().__init__(op.name.lower(), [], [lhs, rhs], [ret])
 
 class NotOp(Operation):
     def __init__(self, value: Value, ret: Value):
@@ -137,13 +171,27 @@ class IfThenElseOp(Operation):
         super().__init__('if', [], [cond, true_value, false_value], [ret])
 
 class GridComputeOp(Operation):
-    def __init__(self, shape: tuple['Value'], block: Block, ret: Value):
-        super().__init__('grid', [block], shape, [ret])
+    def __init__(self, shape: Tuple['Value'], block: Block, ret: Value):
+        super().__init__('grid_compute', [block], shape, [ret])
 
 class GridReduceOp(Operation):
-    def __init__(self, shape: tuple['Value'], block: Block, ret: Value):
-        super().__init__('grid', [block], shape, [ret])
+    def __init__(self, reduction: ReduceOperations, shape: Tuple['Value'], block: Block, ret: Value):
+        super().__init__('grid_reduce', [block], shape, [ret])
 
 class TensorIndexOp(Operation):
-    def __init__(self, tensor: Value, indices: tuple['Value'], ret: Value):
+    def __init__(self, tensor: Value, indices: Tuple['Value'], ret: Value):
         super().__init__('index', [], [tensor, *indices], [ret])
+
+class IRFunctionOp(Operation):
+    def __init__(self, body: Block, name: str):
+        assert isinstance(body.ops[-1], YieldOp)
+        fn_ty = FunctionType([a.type for a in body.args], [body.ops[-1].args[0].type])
+        ret_var = Value(fn_ty, name=name)
+        self.fn_name = name
+        super().__init__('function', [body], [], [ret_var])
+
+class IRModuleOp(Operation):
+    def __init__(self, functions: List[IRFunctionOp]):
+        super().__init__('module', [], [], [])
+        self.ir_functions = functions
+
