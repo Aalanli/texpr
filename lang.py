@@ -1,9 +1,10 @@
 # %%
-from typing import List, Tuple, Callable, Dict, Optional, Union
+from typing import List, Set, Tuple, Callable, Dict, Optional, Union
 import ir
 from ir import Type
+import utils
 
-ValidExpr = Union['Expr', int, float, bool, tuple['ValidExpr']]
+ValidExpr = Union['Expr', int, str, float, bool, tuple['ValidExpr']]
 
 class Expr:
     """
@@ -82,6 +83,7 @@ class Variable(Expr):
         if name is None:
             Variable.uid += 1
         self.type = type
+        self.associated_value = ir.Value(type)
     
     def __str__(self):
         return f'{self.name}: {self.type}'
@@ -116,7 +118,6 @@ class GridReduce(Expr):
             ', '.join(map(str, self.bargs))
         ) + ' { \n' + str(self.expr) + '\n} '
 
-_var2value: Dict[Variable, ir.Value] = {}
 
 def var(type: ir.Type, name: Optional[str] = None) -> Variable:
     return Variable(type, name)
@@ -130,12 +131,7 @@ def tensor(shape: Tuple[Union[int, Variable],...], dtype: ir.DType, name: Option
         if isinstance(s, int):
             new_shape.append(s)
         elif isinstance(s, Variable):
-            if s in _var2value:
-                new_shape.append(_var2value[s])
-            else:
-                val = ir.Value(ir.i32, s.name)
-                _var2value[s] = val
-                new_shape.append(val)
+            new_shape.append(s.associated_value)
     tensor_ty = ir.TensorType(dtype, tuple(new_shape))
     return var(tensor_ty, name)
 
@@ -149,44 +145,65 @@ def shape_of(tensor: Expr, index: int):
     return Expr('shape_of', (tensor, index))
 
 class ExprVisitor:
-    def __init__(self):
-        self.cur_block = [[]]
-        self.var_table = {}
+    def __init__(self) -> None:
+        self.cur_block: List[List[ir.Operation]] = [[]]
+        self.defined_vals: List[Set[ir.Value]] = [set()]
+        self.var_table: Set[Variable] = set()
+        self.memo: Dict[int, ir.Value] = {}
 
     def append_op(self, op):
         self.cur_block[-1].append(op)
     
     def new_block(self):
         self.cur_block.append([])
+        self.defined_vals.append(set())
     
     def pop_block(self):
+        self.defined_vals.pop()
         return self.cur_block.pop()
     
+    def is_val_defined(self, val: ir.Value) -> bool:
+        for i in range(len(self.defined_vals) - 1, -1, -1):
+            if val in self.defined_vals[i]:
+                return True
+        return False
+    
+    def define_val(self, val: ir.Value):
+        self.defined_vals[-1].add(val)
+    
     def register_var(self, var: Variable) -> ir.Value:
-        if var in self.var_table:
-            return self.var_table[var]
-        val = ir.Value(var.type, var.name)
-        self.var_table[var] = val
-        return val
+        if var not in self.var_table:
+            self.var_table.add(var)
+        return var.associated_value
 
     def get_value(self, var: Variable) -> ir.Value:
         if var not in self.var_table:
             raise RuntimeError("cannot fetch var {}".format(var))
-        return self.var_table[var]
+        return var.associated_value
     
     def visit(self, x: ValidExpr) -> ir.Value:
+        uid = id(x)
+        # should be safe to memorize,
+        # if it satisfies python scoping rules, it satisfies IR dominance rules
+        if uid in self.memo and self.is_val_defined(self.memo[uid]):
+            return self.memo[uid]
         if isinstance(x, (int, bool, float)):
             op = ir.ConstantOp(x)
             self.append_op(op)
-            return op.ret[0]
+            res = op.ret[0]
         assert isinstance(x, Expr)
         vname = 'visit_' + x.op_code
         if hasattr(self, vname):
             f = getattr(self, vname)
             assert callable(f)
-            return f(x)
+            res = f(x)
+            assert isinstance(res, ir.Value)
+        else:        
+            raise NotImplementedError(f'visitor for {x.op_code} is not implemented')
         
-        raise NotImplementedError(f'visitor for {x.op_code} is not implemented')
+        self.memo[uid] = res
+        self.define_val(res)
+        return res
 
     def handle_binary(self, opcode: ir.BinaryOpCodes, lhs: ir.Value, rhs: ir.Value, res_type = None):
         assert lhs.type == rhs.type
@@ -262,9 +279,11 @@ class ExprVisitor:
 
     def visit_get_item(self, x: Expr):
         a = self.visit(x.args[0])
-        assert isinstance(x.args[1], tuple)
         assert isinstance(a, ir.Value) and isinstance(a.type, ir.TensorType)
-        indices = tuple(self.visit(i) for i in x.args[1])
+        if isinstance(x.args[1], tuple):
+            indices = tuple(self.visit(i) for i in x.args[1])
+        else:
+            indices = (self.visit(x.args[1]),)
         op = ir.TensorIndexOp(a, indices, ir.Value(a.type.dtype))
         self.append_op(op)
         return op.ret[0]
@@ -288,7 +307,7 @@ class ExprVisitor:
 
         op = ir.GridComputeOp(shape, block, ir.Value(ret_ty))
         self.append_op(op)
-        return res
+        return op.ret[0]
 
     def visit_grid_reduce(self, x: GridReduce):
         shape = tuple(self.visit(s) for s in x.shape)
@@ -304,7 +323,7 @@ class ExprVisitor:
 
         op = ir.GridReduceOp(x.op, shape, block, ir.Value(res.type))
         self.append_op(op)
-        return res
+        return op.ret[0]
     
     def visit_shape_of(self, x: Expr):
         res = self.visit(x.args[0])
@@ -312,11 +331,29 @@ class ExprVisitor:
         assert isinstance(x.args[1], int)
         sh = res.type.shape[x.args[1]]
         if isinstance(sh, int):
-            op = ir.ConstantOp(sh)
-            self.append_op(op)
-            sh = op.ret[0]
-        return sh
+            op1 = ir.ConstantOp(sh)
+            self.append_op(op1)
+            sh1 = op1.ret[0]
+        else:
+            # prevent variable escape
+            op2 = ir.TensorShapeOfOp(res, x.args[1])
+            self.append_op(op2)
+            sh1 = op2.ret[0]
+        return sh1
     
+    def visit_math_elementwise(self, x: Expr):
+        res = self.visit(x.args[1])
+        assert isinstance(x.args[0], str)
+        op = ir.ElementwiseMathOp(x.args[0], res)
+        self.append_op(op)
+        return op.ret[0]
+
+def math_elementwise(x: Expr, opcode: str) -> Expr:
+    return Expr("math_elementwise", (opcode, x))
+
+def exp(x: Expr) -> Expr:
+    return math_elementwise(x, "exp")
+
 
 def trace_function(args: List[Variable], root: Expr, name: str) -> ir.IRFunctionOp:
     visitor = ExprVisitor()
@@ -330,17 +367,61 @@ def trace_function(args: List[Variable], root: Expr, name: str) -> ir.IRFunction
     op = ir.IRFunctionOp(block, name)
     return op
 
+def matmul():
+    m = ivar('m')
+    k = ivar('k')
+    n = 3
 
-m = ivar('m')
-k = ivar('k')
-n = 3
+    A = tensor((m, k), ir.f32)
+    B = tensor((k, n), ir.f32)
+    C = grid_compute((shape_of(A, 0), shape_of(B, 1)), 
+                    lambda i, j: reduce_compute((shape_of(A, 1),),
+                                                lambda k: A[i, k] * B[k, j]))
+    fn = trace_function([A, B], C, 'matmul')
+    return fn
+import time
 
-A = tensor((m, k), ir.f32)
-B = tensor((k, n), ir.f32)
-C = grid_compute((shape_of(A, 0), shape_of(B, 1)), 
-                 lambda i, j: reduce_compute((shape_of(A, 1),),
-                                             lambda k: A[i, k] * B[k, j]))
-print(C)
-fn = trace_function([A, B], C, 'test')
+it = time.time()
+fn = matmul()
+# print(ir.dump_ir(fn))
 
-print(ir.dump_ir(fn))
+n = ivar('n')
+A = tensor((n,), ir.f32)
+n1 = shape_of(A, 0)
+maxes = reduce_compute((n1,),
+                       lambda i: A[i], ir.ReduceOperations.Max)
+a1 = grid_compute((n1,), 
+                  lambda i: A[i] - maxes)
+a2 = grid_compute((n1,),
+                  lambda i: exp(a1[i]))
+s = reduce_compute((n1,),
+                   lambda i: a2[i])
+y = grid_compute((n1,),
+                 lambda i: a2[i] / s)
+
+fn = trace_function([A], y, 'softmax')
+print(ir.basic_verify_ir(fn))
+
+ir.PrettyRenameValues().run_on_op(fn)
+
+print(ir.basic_verify_ir(fn))
+
+# print(ir.dump_ir(fn))
+ir.PureLICM().run_on_op(fn)
+print(ir.basic_verify_ir(fn))
+# print(ir.dump_ir(fn))
+
+capture = ir.CollectPureOpImplicitReference()
+capture.run_on_op(fn)
+dep = ir.OpValueDependenceAnalysis()
+dep.run_on_op(fn)
+ir.PureGreedyCSE(capture, dep).run_on_op(fn)
+print(ir.basic_verify_ir(fn))
+# print(ir.dump_ir(fn))
+liveliness = ir.PureLivelinessAnalysis()
+liveliness.run_on_op(fn)
+
+# print(ir.dump_ir(fn, liveliness.alive))
+ir.PureDce(liveliness).run_on_op(fn)
+print(ir.basic_verify_ir(fn))
+print(fn)
