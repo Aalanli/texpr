@@ -64,12 +64,18 @@ u8  = DType(8, 'u8')
 
 
 class TensorType(Type):
-    def __init__(self, dtype: DType, shape: Tuple[Union['Value', int], ...]):
-        self.dtype: DType = dtype
-        self.shape: Tuple[Union['Value', int], ...] = shape
+    def __init__(self, dtype: DType, shape: Tuple[Optional[int], ...]):
+        self.dtype = dtype
+        self.shape = shape
     
     def __str__(self):
         return f'{self.dtype}[{",".join(map(str, self.shape))}]'
+    
+    def __eq__(self, other):
+        return isinstance(other, TensorType) and self.dtype == other.dtype and self.shape == other.shape
+    
+    def __hash__(self):
+        return hash(str(self))
 
 class FunctionType(Type):
     def __init__(self, args: List[Type], ret: List[Type]):
@@ -173,6 +179,34 @@ class BinaryOpCodes(Enum):
     Eq = 6
     Lt = 7
 
+    LAnd = 8
+    LOr = 9
+
+    def type_check(self, lhs: Type, rhs: Type) -> bool:
+        assert isinstance(lhs, DType) and isinstance(rhs, DType)
+        if lhs != rhs:
+            return False
+        if self.value in (0, 1, 2, 6, 7):
+            return lhs != i1
+        if self.value in (3, 4, 5):
+            return lhs.is_integral()
+        if self.value in (8, 9):
+            return lhs == i1
+        return True
+    
+    def ret_ty(self, lhs: DType, rhs: DType) -> DType:
+        assert self.type_check(lhs, rhs)
+        if self.value in (0, 1, 3, 4, 5, 8, 9):
+            return lhs
+        if self.value == 2:
+            if lhs.is_floating() or rhs.is_floating():
+                return lhs if lhs.is_floating() else rhs
+            else:
+                return lhs
+        if self.value in (6, 7):
+            return i1
+        assert False
+
 class ReduceOperations(Enum):
     Sum = 0
     Min = 1
@@ -193,8 +227,12 @@ class ConstantOp(Operation):
         return Attr(val=self.py_constant)
 
 class YieldOp(Operation):
-    def __init__(self, val: Value):
-        super().__init__('yield', [], [val], [])
+    def __init__(self, val: List[Value]):
+        super().__init__('yield', [], val, [])
+
+class FnReturnOp(Operation):
+    def __init__(self, val: List[Value]):
+        super().__init__('return', [], val, [])
 
 class BinaryOp(Operation):
     def __init__(self, op: BinaryOpCodes, lhs: Value, rhs: Value, ret: Value):
@@ -254,6 +292,11 @@ class TensorShapeOfOp(Operation):
         return v if isinstance(v, Value) else None
     
 
+class AssertOp(Operation):
+    def __init__(self, cond: Value):
+        assert cond.type == i1
+        super().__init__('static_assert', [], [cond], [])
+
 class IRFunctionOp(Operation):
     def __init__(self, body: Block, name: str):
         assert isinstance(body.ops[-1], YieldOp)
@@ -263,9 +306,8 @@ class IRFunctionOp(Operation):
         super().__init__('function', [body], [], [ret_var])
 
 class IRModuleOp(Operation):
-    def __init__(self, functions: List[IRFunctionOp]):
-        super().__init__('module', [], [], [])
-        self.ir_functions = functions
+    def __init__(self, scope: Block):
+        super().__init__('module', [scope], [], [])
 
 
 # IR := op
@@ -301,8 +343,11 @@ class IRPrinter:
         self.unique_names.add(x.name)
         return x.name
     
-    def format_val_list(self, vals: List[Value]) -> str:
-        return ', '.join(map(lambda x: self.namer(x) if x not in self.highlight_value else utils.red(self.namer(x)), vals))
+    def format_val_list(self, vals: List[Value], type_annot: bool = False) -> str:
+        typer = lambda x: ': ' + str(x.type) if type_annot else ''
+        namer = lambda x: self.namer(x) + typer(x)
+        arg_it = map(lambda x: namer(x) if x not in self.highlight_value else utils.red(namer(x)), vals)
+        return ', '.join(arg_it)
     
     def dump_attr_ty(self, attr: AttrTy) -> str:
         if isinstance(attr, (int, float, bool, str)):
@@ -321,7 +366,7 @@ class IRPrinter:
     def dump_op_impl(self, ir: Operation) -> List[Line]:
         arg = self.format_val_list(ir.args)
         if len(ir.ret) > 0:
-            ret = self.format_val_list(ir.ret)
+            ret = self.format_val_list(ir.ret, type_annot=True)
             if len(ir.ret) > 1:
                 ret = '(' + ret + ')'
             header = Line(ret + ' = ' + ir.name + '(' + arg + ')')
