@@ -1,4 +1,3 @@
-
 class COLORS:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -30,4 +29,3 @@ def yellow(v, fmt='{}'):
 
 def red(v, fmt='{}'):
     return COLORS.FAIL + fmt.format(v) + COLORS.ENDC
-

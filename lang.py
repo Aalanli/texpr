@@ -1,297 +1,261 @@
 # %%
-from typing import List, Set, Tuple, Callable, Dict, Optional, Union
+from typing import Callable, ClassVar, List, Tuple, Union, Set, Optional
 import ir
-from ir import Type
-import utils
+from ir import Value, Type, DType
 
-NumExpr = Union['Expr', int, float, bool]
-TraceableExpr = Union[NumExpr, Tuple['TraceableExpr',...]]
-TraceResult = Union[ir.Value, Tuple['TraceResult',...]]
 
 class BlockBuilder:
-    def __init__(self, ir_builder: 'IRBuilder'):
+    def __init__(self, ir_builder: 'IRBuilder', args: List[Value]):
         self.builder = ir_builder
-    
+        self.args = args
+
     def __enter__(self):
         self.builder.cur_block.append([])
-        self.builder.defined_vals.append(set())
-        self.builder.scope_map.append(dict())
-        return self.builder.cur_block[-1]
-    
-    def __exit__(self):
+        block = ir.Block(self.args, self.builder.cur_block[-1])
+        return block
+
+    def __exit__(self, exc_type, exc_value, tb):
         self.builder.cur_block.pop()
-        self.builder.defined_vals.pop()
-        self.builder.scope_map.pop()
-    
+
+
 class IRBuilder:
-    def __init__(self):
+    def __init__(self) -> None:
         self.cur_block: List[List[ir.Operation]] = [[]]
-        self.defined_vals: List[Set[ir.Value]] = [set()]
-        self.scope_map: List[Dict[int, Union[ir.Operation, ir.Value]]] = []
+        # ensures every operation added is unique, id(op)
+        self.op_set: Set[int] = set()
+        # ensures functions do not recurse
+        self.fn_scope: List[Tuple[int, str]] = []  # (id, name)
 
-    def add_op(self, op):
+    def add_op(self, op: ir.Operation):
+        if id(op) in self.op_set:
+            raise RuntimeError("op is already inserted")
         self.cur_block[-1].append(op)
+        self.op_set.add(id(op))
 
-    def new_scope(self) -> BlockBuilder:
-        return BlockBuilder(self)
-    
-    def is_val_defined(self, val: ir.Value) -> bool:
-        for i in range(len(self.defined_vals) - 1, -1, -1):
-            if val in self.defined_vals[i]:
-                return True
-        return False
-    
-    def define_val(self, val: ir.Value):
-        self.defined_vals[-1].add(val)
-    
-    def trace_on_current_scope(self, expr: NumExpr):
-        if self.get_on_current_scope(expr) is not None:
-            return
-        if isinstance(expr, (int, float, bool)):
-            op = ir.ConstantOp(expr)
-            self.add_op(op)
-            self.scope_map[-1][id(expr)] = op
-        else:
-            if expr.op_code in ('var', 'tensor'):
-                # terminals, TODO: make this better
-                res = expr.handler(self, [])
-                assert len(expr.intrace) == 0
-                assert len(res) == 1 and isinstance(res[0], ir.Value)
-                self.scope_map[-1][id(expr)] = res[0]
-                return
-            for sub_expr in expr.intrace:
-                self.trace_on_current_scope(sub_expr)
-            
-    def get_on_current_scope(self, expr: NumExpr) -> Optional[Union[ir.Value, ir.Operation]]:
-        for i in range(len(self.scope_map) -1, -1, -1):
-            if id(expr) in self.scope_map[i]:
-                return self.scope_map[id(expr)]
-        return None
+    def add_global_op(self, op: ir.Operation):
+        if id(op) in self.op_set:
+            raise RuntimeError("op is already inserted")
+        self.cur_block[0].append(op)
+        self.op_set.add(id(op))
 
-class Expr:
-    def __init__(self,
-                 op_code: str,
-                 intrace: List[NumExpr], outputs: List[ir.Type], 
-                 handler: Callable[[IRBuilder, List[ir.Value]], List[ir.Value]]):
-        self.op_code = op_code
-        self.intrace = intrace
-        self.outputs = outputs
-        self.handler = handler
-    
+    def new_scope(self, args: List[Value]) -> BlockBuilder:
+        return BlockBuilder(self, args)
+
+    def build_fn(self, name: str, args: List['Var'], f: Callable):
+        if (id(f), name) in self.fn_scope:
+            raise RuntimeError("recursion is not supported yet")
+        self.fn_scope.append((id(f), name))
+        with self.new_scope([a.value for a in args]) as block:
+            ret = f(*args)
+        self.fn_scope.pop()
+        if isinstance(ret, Var):
+            ret = [ret]
+        block.ops.append(ir.YieldOp([v.value for v in ret]))
+        fn = ir.IRFunctionOp(block, name)
+        self.add_global_op(fn)
+
+    def ir_module(self) -> ir.IRModuleOp:
+        assert len(self.cur_block) == 1
+        block = self.cur_block.pop()
+        return ir.IRModuleOp(ir.Block([], block))
+
+
+class Trace:
+    builders: ClassVar[List[IRBuilder]] = []
+
+    def __init__(self) -> None:
+        self.builder = IRBuilder()
+
+    def __enter__(self) -> IRBuilder:
+        Trace.builders.append(self.builder)
+        return self.builder
+
+    def __exit__(self, exc_type, exc_value, tb):
+        b = Trace.builders.pop()
+        assert b is self.builder
+
     @staticmethod
-    def handle_binary(code: ir.BinaryOpCodes, lhs: 'Expr', rhs: NumExpr):
-        assert len(lhs.outputs) == 1
-        if isinstance(rhs, Expr):
-            assert len(rhs.outputs) == 1
-            rty = rhs.outputs[0]
-        elif isinstance(rhs, int):
-            rty = ir.i32
-        elif isinstance(rhs, float):
-            rty = ir.f32
-        else:
-            rty = ir.i1
-        assert code.type_check(lhs.outputs[0], rty)
-        def handler(builder: IRBuilder, arg: Tuple[ir.Value,ir.Value]) -> Tuple[ir.Value]:
-            op = ir.BinaryOp(code, arg[0], arg[1], ir.Value(rty))
-            builder.add_op(op)
-            return (op.ret[0])
-        return Expr(intrace=[lhs, rhs], outputs=[rty], handler=handler)
+    def current_builder() -> IRBuilder:
+        assert len(Trace.builders) > 0, "builder not initialized"
+        return Trace.builders[-1]
 
-    def __add__(self, other: Union[int, float, 'Expr']):
-        return Expr.handle_binary(ir.BinaryOpCodes.Add, self, other)
 
-    def __sub__(self, other: Union[int, float, 'Expr']):
-        return Expr.handle_binary(ir.BinaryOpCodes.Add, self, other)
+def constant(c: Union[int, float, bool]) -> 'Var':
+    op = ir.ConstantOp(c)
+    Trace.current_builder().add_op(op)
+    return Var(op.ret[0])
 
-    def __mul__(self, other: Union[int, float, 'Expr']):
-        return Expr.handle_binary(ir.BinaryOpCodes.Add, self, other)
 
-    def __truediv__(self, other: Union[int, float, 'Expr']):
-        return Expr.handle_binary(ir.BinaryOpCodes.Add, self, other)
+NumExpr = Union[int, float, bool, 'Var']
 
-    def __floordiv__(self, other: Union[int, float, 'Expr']):
-        return Expr.handle_binary(ir.BinaryOpCodes.Add, self, other)
 
-    def __mod__(self, other: Union[int, float, 'Expr']):
-        return Expr.handle_binary(ir.BinaryOpCodes.Add, self, other)
+def wrap_constexpr(v: NumExpr) -> 'Var':
+    if isinstance(v, (int, float, bool)):
+        return constant(v)
+    return v
 
-    def __bool__(self):
-        raise RuntimeError('Cannot convert to bool, use boolean operators instead')
 
-    def __neg__(self):
-        assert len(self.outputs) == 1
-        ty = self.outputs[0]
-        assert isinstance(ty, ir.DType) and (ty.is_floating() or ty.is_integral())
-        def handler(builder: IRBuilder, a: Tuple[ir.Value]) -> Tuple[ir.Value]:
-            op = ir.NegOp(a[0], ir.Value(a[0].type))
-            builder.add_op(op)
-            return op.ret[-1]
-        return Expr([self], [ty], handler)
+def var(type: Type, name: Optional[str] = None) -> 'Var':
+    return Var(Value(type, name))
 
-    def __not__(self):
-        assert len(self.outputs) == 1
-        ty = self.outputs[0]
-        assert isinstance(ty, ir.DType) and (ty.is_integral() or ty == ir.i1)
-        def handler(builder: IRBuilder, a: Tuple[ir.Value]) -> Tuple[ir.Value]:
-            op = ir.NotOp(a[0], ir.Value(a[0].type))
-            builder.add_op(op)
-            return op.ret[-1]
-        return Expr([self], [ty], handler)
 
-    # def logical_and(self, other: ValidExpr):
-    #     raise NotImplementedError()
-    # def logical_or(self, other: ValidExpr):
-    #     raise NotImplementedError()
-
-    # def if_then_else(self, true_value: ValidExpr, false_value: ValidExpr):
-    #     raise NotImplementedError()
-        
-    def __getitem__(self, indices: Union[NumExpr, Tuple[NumExpr,...]]):
-        return Expr('get_item', (self, indices))
-
-def numexpr_dtype(expr: NumExpr) -> ir.DType:
-    if isinstance(expr, int):
-        return ir.i32
-    elif isinstance(expr, float):
-        return ir.f32
-    elif isinstance(expr, bool):
-        return ir.i1
-    else:
-        assert len(expr.outputs) == 1 and isinstance(expr.outputs[0], ir.DType)
-        return expr.outputs[0]
-
-def var(type: ir.Type, name: Optional[str] = None) -> Expr:
-    return Expr('var', [], [type], lambda b, a: ir.Value(type, name_hint=name))
-
-def ivar(name: Optional[str] = None) -> Expr:
+def ivar(name: Optional[str] = None) -> 'Var':
     return var(ir.i32, name)
 
-def tensor(shape: Tuple[Optional[int],...], dtype: ir.DType, name: Optional[str] = None) -> Expr:
-    ty = ir.TensorType(dtype, shape)
-    return Expr('tensor', [], [ty], lambda b, a: ir.Value(ty, name))
 
-def grid_compute(shape: Tuple[NumExpr,...], f: Callable) -> Expr:
-    assert all(len(i.outputs) == 1 and i.outputs[0] == ir.i32 for i in filter(lambda x: isinstance(x, Expr), shape))
-    block_args = [ivar() for _ in range(len(shape))]
-    res = f(*block_args)
-    assert isinstance(res, NumExpr)
-    ty = ir.TensorType(numexpr_dtype(res), shape=tuple(i if isinstance(i, int) else None for i in shape))
-    def handler(builder: IRBuilder, inputs: List[ir.Value]) -> List[ir.Value]:
-        with builder.new_scope() as block_ops:
-            builder.trace_on_current_scope(res)
-            args: List[ir.Value] = [builder.get_on_current_scope(a) for a in block_args]
-        block = ir.Block(args, block_ops)
-        op = ir.GridComputeOp(inputs, block, ir.Value(ty))
-        builder.add_op(op)
-        return [op.ret[0]]
+def tensor(shape: Tuple[Optional[int], ...], dtype: ir.DType, name: Optional[str] = None):
+    return var(ir.TensorType(dtype, shape), name)
 
-    Expr('grid_compute', intrace=shape, outputs=[ty], handler=handler)
 
-def reduce_compute(shape: Tuple[NumExpr,...], f: Callable, reduction: ir.ReduceOperations = ir.ReduceOperations.Sum) -> Expr:
-    assert all(len(i.outputs) == 1 and i.outputs[0] == ir.i32 for i in filter(lambda x: isinstance(x, Expr), shape))
-    block_args = [ivar() for _ in range(len(shape))]
-    res = f(*block_args)
-    assert isinstance(res, NumExpr)
-    ty = numexpr_dtype(res)
-    def handler(builder: IRBuilder, inputs: List[ir.Value]) -> List[ir.Value]:
-        with builder.new_scope() as block_ops:
-            builder.trace_on_current_scope(res)
-            args: List[ir.Value] = [builder.get_on_current_scope(a) for a in block_args]
-        block = ir.Block(args, block_ops)
-        op = ir.GridReduceOp(reduction, inputs, block, ir.Value(ty))
-        builder.add_op(op)
-        return [op.ret[0]]
+class Var:
+    def __init__(self, value: Value):
+        self.value = value
 
-    Expr('grid_reduce', intrace=shape, outputs=[ty], handler=handler)
+    @staticmethod
+    def from_type(type: ir.Type, name: Optional[str] = None):
+        return Var(Value(type, name))
 
-def shape_of(tensor: Expr, index: int):
-    assert len(tensor.outputs) == 1 and isinstance(tensor.outputs[0], ir.TensorType), "type error"
-    ty = tensor.outputs[0]
-    def handler(builder: IRBuilder, inputs: List[ir.Value]) -> List[ir.Value]:
-        op = ir.TensorShapeOfOp(inputs[0], index)
-        builder.add_op(op)
-        return op.ret[0]
-    return Expr('shape_of', [tensor], [ty.dtype], handler)
+    @staticmethod
+    def handle_binary(op_code: ir.BinaryOpCodes, lhs_: 'Var', rhs_: NumExpr) -> 'Var':
+        rhs = wrap_constexpr(rhs_).value
+        lhs = lhs_.value
+        assert isinstance(lhs.type, ir.DType) and isinstance(rhs.type, ir.DType)
+        assert op_code.type_check(lhs.type, rhs.type)
+        op = ir.BinaryOp(op_code, lhs, rhs, Value(op_code.ret_ty(lhs.type, rhs.type)))
+        Trace.current_builder().add_op(op)
+        return Var(op.ret[0])
 
-def math_elementwise(x: Expr, opcode: str) -> Expr:    
-    assert len(x.outputs) == 1 and isinstance(x.outputs[0], ir.DType), "type error"
-    ty = x.outputs[0]
-    def handler(builder: IRBuilder, inputs: List[ir.Value]) -> List[ir.Value]:
-        op = ir.ElementwiseMathOp(opcode, inputs[0])
-        builder.add_op(op)
-        return op.ret[0]
-    return Expr('shape_of', [x], [ty], handler)
+    def __add__(self, other: NumExpr):
+        return Var.handle_binary(ir.BinaryOpCodes.Add, self, other)
 
-def exp(x: Expr) -> Expr:
-    return math_elementwise(x, "exp")
+    def __sub__(self, other: NumExpr):
+        return Var.handle_binary(ir.BinaryOpCodes.Add, self, wrap_constexpr(other).__neg__())
 
-def trace_function(args: List[Variable], root: Expr, name: str) -> ir.IRFunctionOp:
-    visitor = ExprVisitor()
-    vargs = [visitor.register_var(a) for a in args]
-    res = visitor.visit(root)
-    assert isinstance(res, ir.Value)
+    def __mul__(self, other: NumExpr):
+        return Var.handle_binary(ir.BinaryOpCodes.Mul, self, other)
 
-    body = visitor.pop_block()
-    body.append(ir.YieldOp(res))
-    block = ir.Block(vargs, body)
-    op = ir.IRFunctionOp(block, name)
-    return op
+    def __truediv__(self, other: NumExpr):
+        return Var.handle_binary(ir.BinaryOpCodes.Div, self, other)
 
-def matmul():
-    m = ivar('m')
-    k = ivar('k')
-    n = 3
+    def __floordiv__(self, other: NumExpr):
+        return Var.handle_binary(ir.BinaryOpCodes.Div, self, other)
 
-    A = tensor((m, k), ir.f32)
-    B = tensor((k, n), ir.f32)
-    C = grid_compute((shape_of(A, 0), shape_of(B, 1)), 
-                    lambda i, j: reduce_compute((shape_of(A, 1),),
-                                                lambda k: A[i, k] * B[k, j]))
-    fn = trace_function([A, B], C, 'matmul')
-    return fn
-import time
+    def __mod__(self, other: NumExpr):
+        return Var.handle_binary(ir.BinaryOpCodes.Mod, self, other)
 
-it = time.time()
-fn = matmul()
-# print(ir.dump_ir(fn))
+    def __eq__(self, other):
+        assert isinstance(other, (int, float, bool, Var))
+        return Var.handle_binary(ir.BinaryOpCodes.Eq, self, other)
 
-n = ivar('n')
-A = tensor((n,), ir.f32)
-n1 = shape_of(A, 0)
-maxes = reduce_compute((n1,),
-                       lambda i: A[i], ir.ReduceOperations.Max)
-a1 = grid_compute((n1,), 
-                  lambda i: A[i] - maxes)
-a2 = grid_compute((n1,),
-                  lambda i: exp(a1[i]))
-s = reduce_compute((n1,),
-                   lambda i: a2[i])
-y = grid_compute((n1,),
-                 lambda i: a2[i] / s)
+    # def __bool__(self):
+    #     assert False, 'Cannot convert to bool, use boolean operators instead'
+    #     return False
 
-fn = trace_function([A], y, 'softmax')
-print(ir.basic_verify_ir(fn))
+    def __neg__(self):
+        val = self.value
+        ty = val.type
+        assert isinstance(ty, DType) and (ty.is_floating() or ty.is_integral())
+        op = ir.NegOp(val, Value(ty))
+        Trace.current_builder().add_op(op)
+        return Var(op.ret[0])
 
-ir.PrettyRenameValues().run_on_op(fn)
+    def __getitem__(self, indices: Union[NumExpr, Tuple[NumExpr, ...]]):
+        assert isinstance(self.value.type, ir.TensorType)
+        idx = (
+            [wrap_constexpr(v).value for v in indices]
+            if isinstance(indices, tuple)
+            else [wrap_constexpr(indices).value]
+        )
+        op = ir.TensorIndexOp(self.value, tuple(idx), Value(self.value.type.dtype))
+        Trace.current_builder().add_op(op)
+        return Var(op.ret[0])
 
-print(ir.basic_verify_ir(fn))
 
-# print(ir.dump_ir(fn))
-ir.PureLICM().run_on_op(fn)
-print(ir.basic_verify_ir(fn))
-# print(ir.dump_ir(fn))
+def grid_compute(shape: Tuple[NumExpr, ...], f: Callable) -> Var:
+    assert all(isinstance(s, int) for s in shape if not isinstance(s, Var))
+    builder = Trace.current_builder()
+    args = [var(ir.i32) for _ in range(len(shape))]
+    new_shape = tuple(wrap_constexpr(s).value for s in shape)
+    with builder.new_scope([a.value for a in args]) as block:
+        ret = f(*args)
+    assert isinstance(ret, Var)
+    assert isinstance(ret.value.type, ir.DType)
+    block.ops.append(ir.YieldOp([ret.value]))
+    ret_tensor_shape = tuple(s if isinstance(s, int) else None for s in shape)
+    ret_tensor_type = ir.TensorType(ret.value.type, ret_tensor_shape)
+    op = ir.GridComputeOp(new_shape, block, Value(ret_tensor_type))
+    builder.add_op(op)
+    return Var(op.ret[0])
 
-capture = ir.CollectPureOpImplicitReference()
-capture.run_on_op(fn)
-dep = ir.OpValueDependenceAnalysis()
-dep.run_on_op(fn)
-ir.PureGreedyCSE(capture, dep).run_on_op(fn)
-print(ir.basic_verify_ir(fn))
-# print(ir.dump_ir(fn))
-liveliness = ir.PureLivelinessAnalysis()
-liveliness.run_on_op(fn)
 
-# print(ir.dump_ir(fn, liveliness.alive))
-ir.PureDce(liveliness).run_on_op(fn)
-print(ir.basic_verify_ir(fn))
-print(fn)
+def grid_reduce(reduction: ir.ReduceOperations, shape: Tuple[NumExpr, ...], f: Callable) -> Var:
+    assert all(isinstance(s, int) for s in shape if not isinstance(s, Var))
+    builder = Trace.current_builder()
+    args = [var(ir.i32) for _ in range(len(shape))]
+    new_shape = tuple(wrap_constexpr(s).value for s in shape)
+    with builder.new_scope([a.value for a in args]) as block:
+        ret = f(*args)
+    assert isinstance(ret, Var)
+    assert isinstance(ret.value.type, ir.DType)
+    block.ops.append(ir.YieldOp([ret.value]))
+    op = ir.GridReduceOp(reduction, new_shape, block, Value(ret.value.type))
+    builder.add_op(op)
+    return Var(op.ret[0])
+
+
+def math_fintrinsic(op_code: str, a: Var) -> Var:
+    assert isinstance(a.value.type, DType) and a.value.type.is_floating()
+    op = ir.ElementwiseMathOp(op_code, a.value)
+    Trace.current_builder().add_op(op)
+    return Var(op.ret[0])
+
+
+def exp(a: Var) -> Var:
+    return math_fintrinsic('exp', a)
+
+
+def tensor_shape(tensor: Var) -> Tuple[Optional[int], ...]:
+    assert isinstance(tensor.value.type, ir.TensorType)
+    return tensor.value.type.shape
+
+
+def shape_of(tensor: Var, idx: int) -> Var:
+    assert isinstance(tensor.value.type, ir.TensorType)
+    assert 0 <= idx < len(tensor.value.type.shape)
+    op = ir.TensorShapeOfOp(tensor.value, idx)
+    Trace.current_builder().add_op(op)
+    return Var(op.ret[0])
+
+
+def sassert(cond: NumExpr):
+    res = wrap_constexpr(cond)
+    Trace.current_builder().add_op(ir.AssertOp(res.value))
+
+
+def matmul(a: Var, b: Var):
+    assert len(tensor_shape(a)) == len(tensor_shape(b)) == 2
+    m, k = shape_of(a, 0), shape_of(a, 1)
+    k1, n = shape_of(b, 0), shape_of(b, 1)
+    sassert(k == k1)
+
+    c = grid_compute((m, n), f=lambda i, j: grid_reduce(ir.ReduceOperations.Sum, (k,), f=lambda k: a[i, k] * b[k, j]))
+    return c
+
+
+def softmax(a: Var):
+    assert len(tensor_shape(a)) == 1
+    n = shape_of(a, 0)
+    maxes = grid_reduce(ir.ReduceOperations.Max, (n,), lambda i: a[i])
+    subs = grid_compute((n,), lambda i: exp(a[i] - maxes))
+    sums = grid_reduce(ir.ReduceOperations.Sum, (n,), lambda i: subs[i])
+    y = grid_compute((n,), lambda i: subs[i] / sums)
+    return y
+
+
+with Trace() as builder:
+    builder.build_fn('matmul', [tensor((32, 32), ir.f32), tensor((32, 32), ir.f32)], matmul)
+    builder.build_fn('softmax', [tensor((None,), ir.f32)], softmax)
+
+ir_module = builder.ir_module()
+
+print(ir_module)
