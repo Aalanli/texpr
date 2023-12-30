@@ -146,11 +146,11 @@ class Attr:
 
 
 class Operation:
-    def __init__(self, name: str, blocks: list['Block'], args: list['Value'], ret: list['Value']):
+    def __init__(self, name: str, blocks: List['Block'], args: List['Value'], ret: List['Value']):
         self.name: str = name
-        self.blocks: list['Block'] = blocks
-        self.args: list['Value'] = args
-        self.ret: list['Value'] = ret
+        self.blocks: List['Block'] = blocks
+        self.args: List['Value'] = args
+        self.ret: List['Value'] = ret
 
     def lower_attr(self) -> Optional[Attr]:
         return None
@@ -166,9 +166,9 @@ class Operation:
 
 
 class Block:
-    def __init__(self, args: list['Value'], ops: list['Operation']):
-        self.args: list['Value'] = args
-        self.ops: list['Operation'] = ops
+    def __init__(self, args: List['Value'], ops: List['Operation']):
+        self.args: List['Value'] = args
+        self.ops: List['Operation'] = ops
 
     def __hash__(self):
         return id(self)
@@ -236,7 +236,7 @@ class ConstantOp(Operation):
             ty = f32
         super().__init__('constant', [], [], [Value(ty)])
 
-    def lower_attr(self) -> Attr | None:
+    def lower_attr(self) -> Optional[Attr]:
         return Attr(val=self.py_constant)
 
 
@@ -262,7 +262,7 @@ class ElementwiseMathOp(Operation):
         ret = Value(x.type)
         super().__init__('elementwise', [], [x], [ret])
 
-    def lower_attr(self) -> Attr | None:
+    def lower_attr(self) -> Optional[Attr]:
         return Attr(op_code=self.op_code)
 
 
@@ -291,7 +291,7 @@ class GridReduceOp(Operation):
         super().__init__('grid_reduce', [block], list(shape), [ret])
         self.reduction = reduction
 
-    def lower_attr(self) -> Attr | None:
+    def lower_attr(self) -> Optional[Attr]:
         return Attr(reduction=self.reduction.name)
 
 
@@ -307,7 +307,7 @@ class TensorShapeOfOp(Operation):
         self.index = index
         super().__init__('shape_of', [], [tensor], [val])
 
-    def lower_attr(self) -> Attr | None:
+    def lower_attr(self) -> Optional[Attr]:
         return Attr(index=self.index)
 
     def tied_to(self) -> Optional[Value]:

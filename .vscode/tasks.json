@@ -1,0 +1,22 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "black",
+            "type": "shell",
+            "command": "python3 -m black --skip-string-normalization --skip-magic-trailing-comma --line-length 120 gdsl"
+        },
+        {
+            "label": "mypy",
+            "type": "shell",
+            "command": "python3 -m mypy gdsl"
+        },
+        {
+            "label": "rm-so-files",
+            "type": "shell",
+            "command": "rm *.so */*.so"
+        }
+    ]
+}

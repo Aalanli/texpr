@@ -1,4 +1,6 @@
 from typing import Final
+
+
 class COLORS:
     HEADER: Final[str] = '\033[95m'
     OKBLUE: Final[str] = '\033[94m'
