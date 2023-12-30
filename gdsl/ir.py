@@ -1,7 +1,7 @@
 # %%
 from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union
 from enum import Enum
-import utils
+import gdsl.utils as utils
 
 
 def valid_name(name: str) -> bool:

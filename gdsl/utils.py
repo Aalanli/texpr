@@ -1,14 +1,15 @@
+from typing import Final
 class COLORS:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    MAGENTA = '\033[95m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+    HEADER: Final[str] = '\033[95m'
+    OKBLUE: Final[str] = '\033[94m'
+    OKCYAN: Final[str] = '\033[96m'
+    OKGREEN: Final[str] = '\033[92m'
+    MAGENTA: Final[str] = '\033[95m'
+    WARNING: Final[str] = '\033[93m'
+    FAIL: Final[str] = '\033[91m'
+    ENDC: Final[str] = '\033[0m'
+    BOLD: Final[str] = '\033[1m'
+    UNDERLINE: Final[str] = '\033[4m'
 
 
 def green(v, fmt='{}'):
