@@ -1,7 +1,7 @@
 # %%
 from typing import Callable, ClassVar, List, Tuple, Union, Set, Optional
-from . import ir
-from .ir import Value, Type, DType
+from .ir.pure import ir
+from .ir.pure.ir import Value, Type, DType
 
 
 class BlockBuilder:
@@ -219,14 +219,20 @@ def tensor_shape(tensor: Var) -> Tuple[Optional[int], ...]:
     return tensor.value.type.shape
 
 
-def shape_of(tensor: Var, idx: int) -> Var:
+def shape_of(tensor: Var, idx: int) -> Union[int, Var]:
     assert isinstance(tensor.value.type, ir.TensorType)
     assert 0 <= idx < len(tensor.value.type.shape)
+    s = tensor.value.type.shape[idx]
+    if isinstance(s, int):
+        return s
     op = ir.TensorShapeOfOp(tensor.value, idx)
     Trace.current_builder().add_op(op)
     return Var(op.ret[0])
 
 
 def sassert(cond: NumExpr):
+    if not isinstance(cond, Var):
+        assert isinstance(cond, bool) and cond
+        return
     res = wrap_constexpr(cond)
     Trace.current_builder().add_op(ir.AssertOp(res.value))
