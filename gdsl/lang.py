@@ -54,10 +54,14 @@ class IRBuilder:
         fn = ir.IRFunctionOp(block, name)
         self.add_global_op(fn)
 
-    def ir_module(self) -> ir.IRModuleOp:
+    def finish_ir_module(self) -> ir.IRModuleOp:
         assert len(self.cur_block) == 1
         block = self.cur_block.pop()
         return ir.IRModuleOp(ir.Block([], block))
+
+    def finish_ops(self) -> List[ir.Operation]:
+        assert len(self.cur_block) == 1
+        return self.cur_block.pop()
 
 
 class Trace:
@@ -120,8 +124,8 @@ class Var:
         rhs = wrap_constexpr(rhs_).value
         lhs = lhs_.value
         assert isinstance(lhs.type, ir.DType) and isinstance(rhs.type, ir.DType)
-        assert op_code.type_check(lhs.type, rhs.type)
-        op = ir.BinaryOp(op_code, lhs, rhs, Value(op_code.ret_ty(lhs.type, rhs.type)))
+        assert op_code.type_check([lhs.type, rhs.type])
+        op = ir.ElementwiseOp(op_code, (lhs, rhs))
         Trace.current_builder().add_op(op)
         return Var(op.ret[0])
 
@@ -154,8 +158,8 @@ class Var:
     def __neg__(self):
         val = self.value
         ty = val.type
-        assert isinstance(ty, DType) and (ty.is_floating() or ty.is_integral())
-        op = ir.NegOp(val, Value(ty))
+        assert ir.UnaryOpCodes.Neg.type_check([ty])
+        op = ir.ElementwiseOp(ir.UnaryOpCodes.Neg, [val])
         Trace.current_builder().add_op(op)
         return Var(op.ret[0])
 
@@ -205,7 +209,7 @@ def grid_reduce(reduction: ir.ReduceOperations, shape: Tuple[NumExpr, ...], f: C
 
 def math_fintrinsic(op_code: str, a: Var) -> Var:
     assert isinstance(a.value.type, DType) and a.value.type.is_floating()
-    op = ir.ElementwiseMathOp(op_code, a.value)
+    op = ir.ElementwiseOp(ir.FloatIntrinsicOpCode(op_code), (a.value,))
     Trace.current_builder().add_op(op)
     return Var(op.ret[0])
 

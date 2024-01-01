@@ -1,12 +1,26 @@
 # %%
 from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union
 from enum import Enum
+from gdsl.ir.base_ir import Attr, List, Type
 import gdsl.utils as utils
+from mypy_extensions import trait
 
 from ..base_ir import *
 
 
-class BinaryOpCodes(Enum):
+@trait
+class ElementWiseOpCode:
+    def type_check(self, types: List[Type]) -> bool:
+        assert False
+
+    def result_type(self, types: List[Type]) -> Type:
+        assert False
+
+    def name_of(self) -> str:
+        assert False
+
+
+class BinaryOpCodes(ElementWiseOpCode, Enum):
     Add = 0
     Mul = 1
     Div = 2
@@ -21,7 +35,9 @@ class BinaryOpCodes(Enum):
     LAnd = 8
     LOr = 9
 
-    def type_check(self, lhs: Type, rhs: Type) -> bool:
+    def type_check(self, types: List[Type]) -> bool:
+        assert len(types) == 2
+        lhs, rhs = types
         assert isinstance(lhs, DType) and isinstance(rhs, DType)
         if lhs != rhs:
             return False
@@ -33,8 +49,10 @@ class BinaryOpCodes(Enum):
             return lhs == i1
         return True
 
-    def ret_ty(self, lhs: DType, rhs: DType) -> DType:
-        assert self.type_check(lhs, rhs)
+    def result_type(self, types: List[Type]) -> DType:
+        self.type_check(types)
+        lhs, rhs = types
+        assert isinstance(lhs, DType) and isinstance(rhs, DType)
         if self.value in (0, 1, 3, 4, 5, 8, 9):
             return lhs
         if self.value == 2:
@@ -45,6 +63,51 @@ class BinaryOpCodes(Enum):
         if self.value in (6, 7):
             return i1
         assert False
+
+    def name_of(self) -> str:
+        return self.name.lower()
+
+
+class UnaryOpCodes(ElementWiseOpCode, Enum):
+    Neg = 0
+    Not = 1
+
+    def type_check(self, types: List[Type]) -> bool:
+        assert len(types) == 1
+        ty = types[0]
+        assert isinstance(ty, DType)
+
+        if self.value == 0:
+            return ty.is_floating() or ty.is_integral()
+        else:
+            return ty.is_integral() or ty == i1
+
+    def result_type(self, types: List[Type]) -> Type:
+        assert self.type_check(types)
+        return types[0]
+
+    def name_of(self) -> str:
+        return self.name.lower()
+
+
+class FloatIntrinsicOpCode(ElementWiseOpCode):
+    def __init__(self, op_code: str):
+        self.op_code = op_code
+
+    def type_check(self, types: List[Type]) -> bool:
+        if len(types) == 0:
+            return False
+        t1 = types[0]
+        if not (isinstance(t1, DType) and t1.is_floating()):
+            return False
+        return all(t == t1 for t in types)
+
+    def result_type(self, types: List[Type]) -> Type:
+        self.type_check(types)
+        return types[0]
+
+    def name_of(self) -> str:
+        return self.op_code
 
 
 class ReduceOperations(Enum):
@@ -74,35 +137,14 @@ class YieldOp(Operation):
         super().__init__('yield', [], val, [])
 
 
-class BinaryOp(Operation):
-    def __init__(self, op: BinaryOpCodes, lhs: Value, rhs: Value, ret: Value):
-        super().__init__(op.name.lower(), [], [lhs, rhs], [ret])
-
-
-class ElementwiseMathOp(Operation):
-    def __init__(self, op_code: str, x: Value):
-        assert isinstance(x.type, DType) and x.type.is_floating()
-        self.op_code = op_code
-        ret = Value(x.type)
-        super().__init__('elementwise', [], [x], [ret])
+class ElementwiseOp(Operation):
+    def __init__(self, op: ElementWiseOpCode, args: Tuple[Value, ...]):
+        ret = Value(op.result_type([a.type for a in args]))
+        super().__init__('elementwise', [], list(args), [ret])
+        self.elem_op = op
 
     def lower_attr(self) -> Optional[Attr]:
-        return Attr(op_code=self.op_code)
-
-
-class NotOp(Operation):
-    def __init__(self, value: Value, ret: Value):
-        super().__init__('not', [], [value], [ret])
-
-
-class NegOp(Operation):
-    def __init__(self, value: Value, ret: Value):
-        super().__init__('neg', [], [value], [ret])
-
-
-class IfThenElseOp(Operation):
-    def __init__(self, cond: Value, true_value: Value, false_value: Value, ret: Value):
-        super().__init__('if', [], [cond, true_value, false_value], [ret])
+        return Attr(op=self.elem_op.name_of())
 
 
 class GridComputeOp(Operation):

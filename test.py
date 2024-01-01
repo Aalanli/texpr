@@ -1,6 +1,7 @@
 # %%
 from typing import Tuple
 from gdsl import *
+from gdsl.ir.pure import Block
 
 
 def matmul(a: Var, b: Var):
@@ -56,7 +57,7 @@ with Trace() as builder:
     builder.build_fn("softmax", [tensor((None,), ir.f32)], softmax)
     builder.build_fn('conv2d', [tensor((4, 256, 128, 128), ir.f32), tensor((256, 256, 3, 3), ir.f32)], lambda im, w: conv2d(im, w, stride=(1, 1), dilation=(1, 1)))
 
-ir_module = builder.ir_module()
+ir_module = builder.finish_ir_module()
 
 
 from gdsl.ir.pure import *
@@ -88,6 +89,11 @@ class OpValueDependenceAnalysis(Pass):
         for ret in op.ret:
             self.val_source[ret] = op
         return super().run_on_op(op)
+    
+    def run_on_block(self, block: Block):
+        for arg in block.args:
+            self.val_source[arg] = block
+        return super().run_on_block(block)
 
 
 class PureLICM(Pass):
@@ -369,8 +375,16 @@ class PureDce(Pass):
         return super().run_on_block(block)
 
 
+class VecGridComputeOp(Operation):
+    def __init__(self, shape: Tuple[Value, ...], tile: Tuple[Value,...], block: Block, ret: Value):
+        assert all(s.type == i32 for s in shape)
+        assert all(t.type == i32 for t in tile)
+        super().__init__('grid_compute_tile', [block], shape + tile, [ret])
+        self.shape_len = len(shape)
+
 PrettyRenameValues().run_on_op(ir_module)
 print(ir_module)
 print(ir.basic_verify_ir(ir_module))
+
 
 
