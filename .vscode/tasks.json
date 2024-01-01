@@ -14,9 +14,14 @@
             "command": "python3 -m mypy gdsl"
         },
         {
-            "label": "rm-so-files",
+            "label": "find-so-files",
             "type": "shell",
-            "command": "rm *.so */*.so"
+            "command": "find gdsl -name '*.so' -type f"
+        },
+        {
+            "label": "delete-so-files",
+            "type": "shell",
+            "command": "find gdsl -name '*.so' -type f -delete && rm -r build"
         }
     ]
 }
