@@ -1,68 +1,165 @@
 # %%
-import copy
-from typing import Optional, Tuple
-from gdsl import *
-from gdsl.ir.base_ir import Attr
-from gdsl.ir.pure import Block, Operation
+from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union
+from enum import Enum
+import gdsl.utils as utils
+
+from ..base_ir import *
+
+class BinaryOpCodes(Enum):
+    Add = 0
+    Mul = 1
+    Div = 2
+    Mod = 3
+
+    And = 4
+    Or = 5
+
+    Eq = 6
+    Lt = 7
+
+    LAnd = 8
+    LOr = 9
+
+    def type_check(self, lhs: DType, rhs: DType) -> bool:
+        assert isinstance(lhs, DType) and isinstance(rhs, DType)
+        if lhs != rhs:
+            return False
+        if self.value in (0, 1, 2, 6, 7):
+            return lhs != i1
+        if self.value in (3, 4, 5):
+            return lhs.is_integral()
+        if self.value in (8, 9):
+            return lhs == i1
+        return True
+
+    def ret_ty(self, lhs: DType, rhs: DType) -> DType:
+        assert self.type_check(lhs, rhs)
+        if self.value in (0, 1, 3, 4, 5, 8, 9):
+            return lhs
+        if self.value == 2:
+            if lhs.is_floating() or rhs.is_floating():
+                return lhs if lhs.is_floating() else rhs
+            else:
+                return lhs
+        if self.value in (6, 7):
+            return i1
+        assert False
 
 
-def matmul(a: Var, b: Var):
-    assert len(tensor_shape(a)) == len(tensor_shape(b)) == 2
-    m, k = shape_of(a, 0), shape_of(a, 1)
-    k1, n = shape_of(b, 0), shape_of(b, 1)
-    sassert(k == k1)
-
-    c = grid_compute(
-        (m, n),
-        f=lambda i, j: grid_reduce(
-            ir.ReduceOperations.Sum, (k,), f=lambda k: a[i, k] * b[k, j]
-        ),
-    )
-    return c
+class ReduceOperations(Enum):
+    Sum = 0
+    Min = 1
+    Max = 2
 
 
-def softmax(a: Var):
-    assert len(tensor_shape(a)) == 1
-    n = shape_of(a, 0)
-    maxes = grid_reduce(ir.ReduceOperations.Max, (n,), lambda i: a[i])
-    subs = grid_compute((n,), lambda i: exp(a[i] - maxes))
-    sums = grid_reduce(ir.ReduceOperations.Sum, (n,), lambda i: subs[i])
-    y = grid_compute((n,), lambda i: subs[i] / sums)
-    return y
+class ConstantOp(Operation):
+    def __init__(self, py_constant):
+        assert isinstance(py_constant, (int, bool, float))
+        self.py_constant = py_constant
+        if isinstance(py_constant, int):
+            ty = i32
+        elif isinstance(py_constant, bool):
+            ty = i1
+        elif isinstance(py_constant, float):
+            ty = f32
+        super().__init__('constant', [], [], [Value(ty)])
+
+    def lower_attr(self) -> Optional[Attr]:
+        return Attr(val=self.py_constant)
 
 
-def conv2d(im: Var, weight: Var, stride: Tuple[int, int], dilation: Tuple[int, int]) -> Var:
-    assert len(tensor_shape(im)) == len(tensor_shape(weight)) == 4
-    b, c1, h, w = [shape_of(im, i) for i in range(4)]
-    c2, c11, kx, ky = [shape_of(weight, i) for i in range(4)]
-    sassert(c11 == c1)
-    dilx, dily = dilation
-    stx, sty = stride
-
-    p = (h - (kx - 1) * dilx - 1) // stx + 1
-    q = (w - (ky - 1) * dily - 1) // sty + 1
-    y = grid_compute(
-        (b,c2,p,q),
-        f=lambda bi, c2i, pi, qi: grid_reduce(
-            reduction=ir.ReduceOperations.Sum,
-            shape=(c1, kx, ky),
-            f=lambda jc, jx, jy: im[bi, jc, pi * stx + jx * dilx, qi * sty + jy * dily] * \
-                weight[c2i, jc, jx, jy]
-        ))
-    return y
+class YieldOp(Operation):
+    def __init__(self, val: List[Value]):
+        super().__init__('yield', [], val, [])
 
 
-with Trace() as builder:
-    builder.build_fn(
-        "matmul", [tensor((32, 32), ir.f32), tensor((32, 32), ir.f32)], matmul
-    )
-    builder.build_fn("softmax", [tensor((None,), ir.f32)], softmax)
-    builder.build_fn('conv2d', [tensor((4, 256, 128, 128), ir.f32), tensor((256, 256, 3, 3), ir.f32)], lambda im, w: conv2d(im, w, stride=(1, 1), dilation=(1, 1)))
-
-ir_module = builder.finish_ir_module()
+class BinaryOp(Operation):
+    def __init__(self, op: BinaryOpCodes, lhs: Value, rhs: Value, ret: Value):
+        super().__init__(op.name.lower(), [], [lhs, rhs], [ret])
 
 
-from gdsl.ir.pure import *
+class ElementwiseMathOp(Operation):
+    def __init__(self, op_code: str, x: Value):
+        assert isinstance(x.type, DType) and x.type.is_floating()
+        self.op_code = op_code
+        ret = Value(x.type)
+        super().__init__('elementwise', [], [x], [ret])
+
+    def lower_attr(self) -> Optional[Attr]:
+        return Attr(op_code=self.op_code)
+
+
+class NotOp(Operation):
+    def __init__(self, value: Value, ret: Value):
+        super().__init__('not', [], [value], [ret])
+
+
+class NegOp(Operation):
+    def __init__(self, value: Value, ret: Value):
+        super().__init__('neg', [], [value], [ret])
+
+
+class IfThenElseOp(Operation):
+    def __init__(self, cond: Value, true_value: Value, false_value: Value, ret: Value):
+        super().__init__('if', [], [cond, true_value, false_value], [ret])
+
+
+class GridComputeOp(Operation):
+    def __init__(self, shape: Tuple['Value', ...], block: Block, ret: Value):
+        super().__init__('grid_compute', [block], list(shape), [ret])
+
+
+class GridReduceOp(Operation):
+    def __init__(self, reduction: ReduceOperations, shape: Tuple['Value', ...], block: Block, ret: Value):
+        super().__init__('grid_reduce', [block], list(shape), [ret])
+        self.reduction = reduction
+
+    def lower_attr(self) -> Optional[Attr]:
+        return Attr(reduction=self.reduction.name)
+
+
+class TensorIndexOp(Operation):
+    def __init__(self, tensor: Value, indices: Tuple['Value', ...], ret: Value):
+        super().__init__('index', [], [tensor, *indices], [ret])
+
+
+class TensorShapeOfOp(Operation):
+    def __init__(self, tensor: Value, index: int):
+        assert isinstance(tensor.type, TensorType)
+        val = Value(i32, 's')
+        self.index = index
+        super().__init__('shape_of', [], [tensor], [val])
+
+    def lower_attr(self) -> Optional[Attr]:
+        return Attr(index=self.index)
+
+    def tied_to(self) -> Optional[Value]:
+        assert isinstance(self.args[0].type, TensorType)
+        v = self.args[0].type.shape[self.index]
+        return v if isinstance(v, Value) else None
+
+
+class AssertOp(Operation):
+    def __init__(self, cond: Value):
+        assert cond.type == i1
+        super().__init__('static_assert', [], [cond], [])
+
+
+class IRFunctionOp(Operation):
+    def __init__(self, body: Block, name: str):
+        assert isinstance(body.ops[-1], YieldOp)
+        fn_ty = FunctionType([a.type for a in body.args], [body.ops[-1].args[0].type])
+        ret_var = Value(fn_ty, name_hint=name)
+        self.fn_name = name
+        super().__init__('function', [body], [], [ret_var])
+    
+    def lower_attr(self) -> Optional[Attr]:
+        return Attr(name=self.fn_name)
+
+
+class IRModuleOp(Operation):
+    def __init__(self, scope: Block):
+        super().__init__('module', [scope], [], [])
 
 
 class Pass:
@@ -91,11 +188,6 @@ class OpValueDependenceAnalysis(Pass):
         for ret in op.ret:
             self.val_source[ret] = op
         return super().run_on_op(op)
-    
-    def run_on_block(self, block: Block):
-        for arg in block.args:
-            self.val_source[arg] = block
-        return super().run_on_block(block)
 
 
 class PureLICM(Pass):
@@ -375,130 +467,3 @@ class PureDce(Pass):
                 new_ops.append(op)
         block.ops = new_ops
         return super().run_on_block(block)
-
-
-class TuneOp(Operation):
-    def __init__(self, decisions: List[int]):
-        assert len(decisions) > 0
-        ret = Value(i32)
-        super().__init__("tune", [], [], [ret])
-        self.decisions = decisions
-    
-    def lower_attr(self) -> Optional[Attr]:
-        return Attr(decisions=self.decisions)
-
-
-class VecGridComputeOp(Operation):
-    def __init__(self, shape: Tuple[Value, ...], tile: Tuple[Value,...], block: Block, ret: Value):
-        assert all(s.type == i32 for s in shape)
-        assert all(t.type == i32 for t in tile)
-        super().__init__('grid_compute_tile', [block], list(shape + tile), [ret])
-        self.shape_len = len(shape)
-
-PrettyRenameValues().run_on_op(ir_module)
-print(ir_module)
-print(ir.basic_verify_ir(ir_module))
-
-class PassFailureException(Exception):
-    def __init__(self, ir: Operation, message: str, highlight_values: List[Value]) -> None:
-        super().__init__(f"failed with {message} \n" + IRPrinter(highlight_value=set(highlight_values)).dump_op(ir))
-
-class PurePass:
-    def run_on_block(self, block: Block) -> List[Block]:    
-        ops = []
-        for op in block.ops:
-            ops.extend(self.run_on_op(op))
-        return [Block(block.args.copy(), ops)]
-
-    def run_on_op(self, op: Operation) -> List[Operation]:
-        blocks = []
-        for block in op.blocks:
-            blocks.extend(self.run_on_block(block))
-        
-        old_block = op.blocks
-        op.blocks = []
-
-        new_op = copy.copy(op)
-        op.blocks = old_block
-        new_op.blocks = blocks
-        return [new_op]
-
-
-class TryVectorizeDimensionPass(PurePass):
-    def __init__(self, arg: Value, new_arg: Value):
-        assert isinstance(arg.type, DType) and isinstance(new_arg.type, TensorType)
-        assert len(new_arg.type.shape) == 1
-        self.arg = arg
-        self.new_arg = new_arg
-        self.arg_map: Dict[Value, Value] = {arg: new_arg}
-        # maps (tensor, dim) -> val
-        # which tensor dimensions is under the influence of which value
-        self.dim_influence: Dict[Tuple[Value, int], Value] = {}
-    
-    def run_on_block(self, block: Block) -> List[Block]:
-        new_args = [a if a not in self.arg_map else self.arg_map[a] for a in block.args]
-        if new_args == block.args:
-            return [block]
-        new_block = super().run_on_block(block)[0]
-        new_block.args = new_args
-        return [new_block]
-    
-    def run_on_op(self, op: Operation) -> List[Operation]:
-        new_args = [a if a not in self.arg_map else self.arg_map[a] for a in op.args]
-        if new_args == op.args and isinstance(op, TensorIndexOp):
-            indices = new_args[1:]
-            res = op.ret[0]
-            assert all(i.type == i32 or (isinstance(i.type, TensorType) and i.type.dtype == i32) for i in indices)
-            out_index_count = 0
-            for i in indices:
-                if not isinstance(i.type, TensorType):
-                    continue
-                for j in range(len(i.type.shape)):
-                    if (i, j) not in self.dim_influence:
-                        raise PassFailureException(op, f"cannot find dimension {j} influence", [i])
-                    self.dim_influence[(res, out_index_count)] = self.dim_influence[(i, j)]
-                    out_index_count += 1
-                    
-            return [op]
-        if new_args == op.args:
-            return [op]
-
-        if isinstance(op, TensorIndexOp):
-            indexed = new_args[0]
-            indices = new_args[1:]
-            
-            res_shape = []
-            for i in indices:
-                if not isinstance(i.type, TensorType):
-                    continue
-                for j in range(len(i.type.shape)):
-                    res_shape.append(j)
-                    if (i, j) not in self.dim_influence:
-                        raise PassFailureException(op, f"cannot find dimension {j} influence", [i])
-                    self.dim_influence[(res, len(res_shape) - 1)] = self.dim_influence[(i, j)]
-
-            rtype = op.ret[0].type
-            if isinstance(rtype, TensorType):
-                rtype = rtype.dtype
-            assert isinstance(rtype, DType)
-            ret = Value(TensorType(rtype, tuple(res_shape)))
-            self.arg_map[op.ret[0]] = ret
-            new_op = TensorIndexOp(indexed, tuple(indices), ret)
-            return [new_op]
-        elif isinstance(op, ElementwiseOp):
-            tensor_args = [i for i in new_args if isinstance(i.type, TensorType)]
-            tensor_prop = []
-            for a in tensor_args:
-                assert isinstance(a.type, TensorType)
-                tensor_prop.append([self.dim_influence[(a, j)] for j in range(len(a.type.shape))])
-            temp_remap = {a: a for a in tensor_args}
-            
-
-        elif isinstance(op, ElementwiseOp):
-            pass
-        
-        
-        return super().run_on_op(op)
-
-new_ir_module = PurePass().run_on_op(ir_module)[0]
-print(basic_verify_ir(new_ir_module))

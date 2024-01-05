@@ -1,5 +1,5 @@
 # %%
-from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union
+from typing import ClassVar, Dict, List, Optional, Callable, Sequence, Set, Tuple, Union
 from enum import Enum
 import gdsl.utils as utils
 
@@ -126,7 +126,7 @@ class Value:
         return str(self)
 
 
-AttrTy = Union[int, float, bool, str, Tuple['AttrTy', ...], Dict[str, 'AttrTy']]
+AttrTy = Union[int, float, bool, str, Tuple['AttrTy', ...], Sequence['AttrTy'], Dict[str, 'AttrTy']]
 
 
 class Attr:

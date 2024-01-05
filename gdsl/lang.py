@@ -1,7 +1,7 @@
 # %%
 from typing import Callable, ClassVar, List, Tuple, Union, Set, Optional
 from .ir.pure import ir
-from .ir.pure.ir import Value, Type, DType
+from .ir.pure.ir import Value, DType, DType
 
 
 class BlockBuilder:
@@ -99,7 +99,7 @@ def wrap_constexpr(v: NumExpr) -> 'Var':
     return v
 
 
-def var(type: Type, name: Optional[str] = None) -> 'Var':
+def var(type: ir.Type, name: Optional[str] = None) -> 'Var':
     return Var(Value(type, name))
 
 
@@ -116,7 +116,7 @@ class Var:
         self.value = value
 
     @staticmethod
-    def from_type(type: ir.Type, name: Optional[str] = None):
+    def from_type(type: ir.DType, name: Optional[str] = None):
         return Var(Value(type, name))
 
     @staticmethod

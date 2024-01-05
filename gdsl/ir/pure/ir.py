@@ -1,5 +1,6 @@
 # %%
-from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union
+import copy
+from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union, cast
 from enum import Enum
 from gdsl.ir.base_ir import Attr, List, Type
 import gdsl.utils as utils
@@ -10,15 +11,37 @@ from ..base_ir import *
 
 @trait
 class ElementWiseOpCode:
-    def type_check(self, types: List[Type]) -> bool:
+    def type_check(self, types: List[DType]) -> bool:
         assert False
 
-    def result_type(self, types: List[Type]) -> Type:
+    def result_type(self, types: List[DType]) -> DType:
         assert False
 
     def name_of(self) -> str:
         assert False
 
+Dim = List[Optional[int]]
+def broadcast_many(shapes: List[Dim]) -> Dim:
+    shape = shapes[0]
+    for i in range(1, len(shapes)):
+        shape = broadcast(shape, shapes[i])
+    return shape
+
+def broadcast(sh1: Dim, sh2: Dim) -> Dim:
+    if len(sh1) < len(sh2):
+        return broadcast(sh2, sh1)
+    sh2_ = [1] * (len(sh1) - len(sh2)) + sh2
+    new_shape = []
+    for i, j in zip(sh1, sh2_):
+        if i == 1:
+            new_shape.append(j)
+        elif j == 1:
+            new_shape.append(i)
+        elif i == j:
+            new_shape.append(i)
+        else:
+            new_shape.append(None)
+    return new_shape
 
 class BinaryOpCodes(ElementWiseOpCode, Enum):
     Add = 0
@@ -35,7 +58,7 @@ class BinaryOpCodes(ElementWiseOpCode, Enum):
     LAnd = 8
     LOr = 9
 
-    def type_check(self, types: List[Type]) -> bool:
+    def type_check(self, types: List[DType]) -> bool:
         assert len(types) == 2
         lhs, rhs = types
         assert isinstance(lhs, DType) and isinstance(rhs, DType)
@@ -49,7 +72,7 @@ class BinaryOpCodes(ElementWiseOpCode, Enum):
             return lhs == i1
         return True
 
-    def result_type(self, types: List[Type]) -> DType:
+    def result_dtype(self, types: List[DType]) -> DType:
         self.type_check(types)
         lhs, rhs = types
         assert isinstance(lhs, DType) and isinstance(rhs, DType)
@@ -72,7 +95,7 @@ class UnaryOpCodes(ElementWiseOpCode, Enum):
     Neg = 0
     Not = 1
 
-    def type_check(self, types: List[Type]) -> bool:
+    def type_check(self, types: List[DType]) -> bool:
         assert len(types) == 1
         ty = types[0]
         assert isinstance(ty, DType)
@@ -82,7 +105,7 @@ class UnaryOpCodes(ElementWiseOpCode, Enum):
         else:
             return ty.is_integral() or ty == i1
 
-    def result_type(self, types: List[Type]) -> Type:
+    def result_type(self, types: List[DType]) -> DType:
         assert self.type_check(types)
         return types[0]
 
@@ -94,7 +117,7 @@ class FloatIntrinsicOpCode(ElementWiseOpCode):
     def __init__(self, op_code: str):
         self.op_code = op_code
 
-    def type_check(self, types: List[Type]) -> bool:
+    def type_check(self, types: List[DType]) -> bool:
         if len(types) == 0:
             return False
         t1 = types[0]
@@ -102,7 +125,7 @@ class FloatIntrinsicOpCode(ElementWiseOpCode):
             return False
         return all(t == t1 for t in types)
 
-    def result_type(self, types: List[Type]) -> Type:
+    def result_type(self, types: List[DType]) -> DType:
         self.type_check(types)
         return types[0]
 
@@ -139,12 +162,33 @@ class YieldOp(Operation):
 
 class ElementwiseOp(Operation):
     def __init__(self, op: ElementWiseOpCode, args: Tuple[Value, ...]):
-        ret = Value(op.result_type([a.type for a in args]))
+        ret = Value(ElementwiseOp.get_res_type(op, [a.type for a in args]))
         super().__init__('elementwise', [], list(args), [ret])
         self.elem_op = op
 
     def lower_attr(self) -> Optional[Attr]:
         return Attr(op=self.elem_op.name_of())
+    
+    @staticmethod
+    def get_res_type(op: ElementWiseOpCode, types: List[Type]) -> Type:
+        if all(isinstance(t, DType) for t in types):
+            return op.result_type(cast(List[DType], types))
+        assert all(isinstance(t, DType) or isinstance(t, TensorType) for t in types)
+        dtypes_ = [t.dtype if isinstance(t, TensorType) else t for t in types]
+        dtypes = cast(List[DType], dtypes_)
+        res_ty = op.result_type(dtypes)
+        shapes = [list(t.shape) if isinstance(t, TensorType) else [1] for t in types]
+        
+        return TensorType(res_ty, tuple(broadcast_many(shapes)))
+
+
+class ExpandDimOp(Operation):
+    def __init__(self, tensor: Value, idx: int):
+        assert isinstance(tensor.type, TensorType)
+        assert 0 <= idx <= len(tensor.type.shape)
+        res_shape = tensor.type.shape[:idx] + (1,) + tensor.type.shape[idx:]
+        res = Value(TensorType(tensor.type.dtype, res_shape))
+        super().__init__("expand_dim", [], [tensor], [res])
 
 
 class GridComputeOp(Operation):
