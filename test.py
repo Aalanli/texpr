@@ -177,6 +177,27 @@ class CollectBlockArgs(Pass):
         self.values.extend(block.args)
         super().run_on_block(block)
 
+class CollectValue(Pass):
+    def __init__(self) -> None:
+        self.values: List[Value] = []
+
+    def run_on_op(self, op: Operation):
+        self.values.extend(op.ret)
+        super().run_on_op(op)
+    
+    def run_on_block(self, block: Block):
+        self.values.extend(block.args)
+        super().run_on_block(block)
+
+class ValueNameGetter:
+    def __init__(self, op: Operation) -> None:
+        values = CollectValue()
+        values.run_on_op(op)
+        self.names_value = {v.name: v for v in values.values}
+    
+    def get(self, name: str) -> Value:
+        return self.names_value[name]
+
 
 def fill_with_name(i: int) -> str:
     ia = ord('a')
@@ -404,101 +425,162 @@ class PassFailureException(Exception):
         super().__init__(f"failed with {message} \n" + IRPrinter(highlight_value=set(highlight_values)).dump_op(ir))
 
 class PurePass:
-    def run_on_block(self, block: Block) -> List[Block]:    
+    def __init__(self) -> None:
+        self._remap: Dict[Value, Value] = {}
+        self._insert_before: List[List[Operation]] = []
+        self._insert_after: List[List[Operation]] = []
+    
+    def run_on_block(self, block: Block) -> Block:    
         ops = []
         for op in block.ops:
-            ops.extend(self.run_on_op(op))
-        return [Block(block.args.copy(), ops)]
+            self._insert_before.append([])
+            self._insert_after.append([])
+            op = self.run_on_op(op)
+            ops.extend(self._insert_before.pop())
+            ops.append(op)
+            ops.extend(self._insert_after.pop())
+        args = [self._remap.get(a, a) for a in block.args]
+        return Block(args, ops)
 
-    def run_on_op(self, op: Operation) -> List[Operation]:
+    def run_on_op(self, op: Operation) -> Operation:
         blocks = []
         for block in op.blocks:
-            blocks.extend(self.run_on_block(block))
+            blocks.append(self.run_on_block(block))
         
         old_block = op.blocks
         op.blocks = []
 
+        # TODO: hack, should handle via trait
         new_op = copy.copy(op)
         op.blocks = old_block
         new_op.blocks = blocks
-        return [new_op]
 
+        new_op.args = [self._remap.get(a, a) for a in op.args]
+        new_op.ret = [self._remap.get(r, r) for r in op.ret]
+
+        return new_op
+    
+    def remap(self, old: Value, new: Value):
+        assert old not in self._remap
+        self._remap[old] = new
+
+    def insert_before(self, new_ops: List[Operation]):
+        self._insert_before[-1].extend(new_ops)
+    
+    def insert_after(self, new_ops: List[Operation]):
+        self._insert_after[-1].extend(new_ops)
+
+
+class DimensionInfluence:
+    def __init__(self):
+        self.influence: Dict[Value, List[Value]] = {}
+    
+    def add_influence(self, val: Value, infl: Value):
+        if val not in self.influence:
+            self.influence[val] = []
+        
+        assert infl not in self.influence[val]
+        self.influence[val].append(infl)
+    
+    def join(self, args: List[Value], res_dtype: DType) -> Tuple[List[Operation], List[Value], Value]:
+        assert all(
+            a in self.influence and len(self.influence[a]) == len(a.type.shape) 
+            for a in args if isinstance(a.type, TensorType))
+        
+        res_influences = set()
+        for a in args:
+            res_influences.update(self.influence[a])
+        
+        res = list(res_influences)
+        res.sort(key=lambda v: hash(v))
+        transforms = []
+        new_args = []
+        for a in args:
+            if isinstance(a.type, TensorType):
+                infl = self.influence[a]
+                # check that influence appears in the same order
+                infl_idx = [res.index(i) for i in infl]
+                infl_idx.sort()
+                assert infl_idx == [res.index(i) for i in infl]
+
+                # insert necesesary expand_dims
+                i = 0
+                j = 0
+                cur_arg = a
+                while i < len(res) and j < len(infl):
+                    if res[i] == infl[j]:
+                        i += 1
+                        j += 1
+                    else:
+                        expand = ExpandDimOp(cur_arg, j)
+                        transforms.append(expand)
+                        cur_arg = expand.ret[0]
+                        i += 1
+                new_args.append(cur_arg)
+            else:
+                new_args.append(a)
+        res_shape = broadcast_many([list(a.type.shape) for a in args if isinstance(a.type, TensorType)])
+        res_val = Value(TensorType(res_dtype, tuple(res_shape)))
+        self.influence[res_val] = res
+        return cast(List[Operation], transforms), new_args, res_val
+    
 
 class TryVectorizeDimensionPass(PurePass):
-    def __init__(self, arg: Value, new_arg: Value):
-        assert isinstance(arg.type, DType) and isinstance(new_arg.type, TensorType)
-        assert len(new_arg.type.shape) == 1
-        self.arg = arg
-        self.new_arg = new_arg
-        self.arg_map: Dict[Value, Value] = {arg: new_arg}
-        # maps (tensor, dim) -> val
-        # which tensor dimensions is under the influence of which value
-        self.dim_influence: Dict[Tuple[Value, int], Value] = {}
+    def __init__(self, args: Dict[Value, int]):
+        super().__init__()
+        self.influence = DimensionInfluence()
+        self.args = args
     
-    def run_on_block(self, block: Block) -> List[Block]:
-        new_args = [a if a not in self.arg_map else self.arg_map[a] for a in block.args]
-        if new_args == block.args:
-            return [block]
-        new_block = super().run_on_block(block)[0]
-        new_block.args = new_args
-        return [new_block]
-    
-    def run_on_op(self, op: Operation) -> List[Operation]:
-        new_args = [a if a not in self.arg_map else self.arg_map[a] for a in op.args]
-        if new_args == op.args and isinstance(op, TensorIndexOp):
-            indices = new_args[1:]
-            res = op.ret[0]
-            assert all(i.type == i32 or (isinstance(i.type, TensorType) and i.type.dtype == i32) for i in indices)
-            out_index_count = 0
-            for i in indices:
-                if not isinstance(i.type, TensorType):
-                    continue
-                for j in range(len(i.type.shape)):
-                    if (i, j) not in self.dim_influence:
-                        raise PassFailureException(op, f"cannot find dimension {j} influence", [i])
-                    self.dim_influence[(res, out_index_count)] = self.dim_influence[(i, j)]
-                    out_index_count += 1
-                    
-            return [op]
-        if new_args == op.args:
-            return [op]
+    def run_on_op(self, op: Operation) -> Operation:
+        op = super().run_on_op(op)
 
-        if isinstance(op, TensorIndexOp):
-            indexed = new_args[0]
-            indices = new_args[1:]
-            
-            res_shape = []
-            for i in indices:
-                if not isinstance(i.type, TensorType):
-                    continue
-                for j in range(len(i.type.shape)):
-                    res_shape.append(j)
-                    if (i, j) not in self.dim_influence:
-                        raise PassFailureException(op, f"cannot find dimension {j} influence", [i])
-                    self.dim_influence[(res, len(res_shape) - 1)] = self.dim_influence[(i, j)]
+        if isinstance(op, (GridComputeOp, GridReduceOp)):
+            assert len(op.blocks) == 1
+            block = op.blocks[0]
+            for arg in block.args:
+                if arg in self.args:
+                    new_arg = Value(TensorType(i32, (self.args[arg],)), arg.name_hint)
+                    self.remap(arg, new_arg)
+                    self.influence.add_influence(new_arg, new_arg)
+                elif isinstance(arg.type, TensorType):
+                    self.influence.add_influence(arg, arg)
 
-            rtype = op.ret[0].type
-            if isinstance(rtype, TensorType):
-                rtype = rtype.dtype
-            assert isinstance(rtype, DType)
-            ret = Value(TensorType(rtype, tuple(res_shape)))
-            self.arg_map[op.ret[0]] = ret
-            new_op = TensorIndexOp(indexed, tuple(indices), ret)
-            return [new_op]
-        elif isinstance(op, ElementwiseOp):
-            tensor_args = [i for i in new_args if isinstance(i.type, TensorType)]
-            tensor_prop = []
-            for a in tensor_args:
-                assert isinstance(a.type, TensorType)
-                tensor_prop.append([self.dim_influence[(a, j)] for j in range(len(a.type.shape))])
-            temp_remap = {a: a for a in tensor_args}
-            
+            new_block = self.run_on_block(block)
 
-        elif isinstance(op, ElementwiseOp):
-            pass
+            if isinstance(op, GridComputeOp):
+                return GridComputeOp(tuple(op.args), new_block, op.ret[0])
+            else:
+                return GridReduceOp(op.reduction, tuple(op.args), new_block, op.ret[0])
         
+        if isinstance(op, (ElementwiseOp, TensorIndexOp)):
+            res_type = op.ret[0].type
+            if isinstance(res_type, DType):
+                res_dtype = res_type
+            elif isinstance(res_type, TensorType):
+                res_dtype = res_type.dtype
+            else:
+                assert False
+            transforms, new_args, res_val = self.influence.join(op.args, res_dtype)
+            self.remap(op.ret[0], res_val)
+            self.insert_before(transforms)
+            if isinstance(op, ElementwiseOp):
+                op = ElementwiseOp(op.elem_op, tuple(new_args))
+                op.ret = [res_val]
+            else:
+                op = TensorIndexOp(new_args[0], tuple(new_args[1:]), res_val)
+            return op
         
-        return super().run_on_op(op)
+        return op
 
-new_ir_module = PurePass().run_on_op(ir_module)[0]
+
+new_ir_module = PurePass().run_on_op(ir_module)
 print(basic_verify_ir(new_ir_module))
+
+# %%
+name_getter = ValueNameGetter(new_ir_module)
+i = name_getter.get('%2')
+j = name_getter.get('%3')
+
+vec = TryVectorizeDimensionPass({i: 4, j: 4})
+vec_ir = vec.run_on_op(new_ir_module)
+
