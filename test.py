@@ -426,7 +426,6 @@ class PassFailureException(Exception):
 
 class PurePass:
     def __init__(self) -> None:
-        self._remap: Dict[Value, Value] = {}
         self._insert_before: List[List[Operation]] = []
         self._insert_after: List[List[Operation]] = []
     
@@ -439,8 +438,7 @@ class PurePass:
             ops.extend(self._insert_before.pop())
             ops.append(op)
             ops.extend(self._insert_after.pop())
-        args = [self._remap.get(a, a) for a in block.args]
-        return Block(args, ops)
+        return Block(block.args, ops)
 
     def run_on_op(self, op: Operation) -> Operation:
         blocks = []
@@ -455,20 +453,34 @@ class PurePass:
         op.blocks = old_block
         new_op.blocks = blocks
 
-        new_op.args = [self._remap.get(a, a) for a in op.args]
-        new_op.ret = [self._remap.get(r, r) for r in op.ret]
+        new_op.args = op.args
+        new_op.ret = op.ret
 
         return new_op
     
-    def remap(self, old: Value, new: Value):
-        assert old not in self._remap
-        self._remap[old] = new
-
     def insert_before(self, new_ops: List[Operation]):
         self._insert_before[-1].extend(new_ops)
     
     def insert_after(self, new_ops: List[Operation]):
         self._insert_after[-1].extend(new_ops)
+
+
+class ArgRemapper:
+    def __init__(self, remap: Optional[Dict[Value, Value]] = None) -> None:
+        self.remap = remap if remap is not None else {}
+    
+    def remap_value(self, old: Value, new: Value):
+        assert old not in self.remap
+        self.remap[old] = new
+    
+    def shallow_remap_op(self, op: Operation) -> Operation:
+        new_op = copy.copy(op)
+        new_op.args = [self.remap.get(a, a) for a in op.args]
+        new_op.ret = [self.remap.get(r, r) for r in op.ret]
+        return new_op
+    
+    def shallow_remap_block(self, block: Block) -> Block:
+        return Block([self.remap.get(a, a) for a in block.args], block.ops)
 
 
 class DimensionInfluence:
@@ -489,7 +501,8 @@ class DimensionInfluence:
         
         res_influences = set()
         for a in args:
-            res_influences.update(self.influence[a])
+            if a in self.influence:
+                res_influences.update(self.influence[a])
         
         res = list(res_influences)
         res.sort(key=lambda v: hash(v))
@@ -519,7 +532,10 @@ class DimensionInfluence:
                 new_args.append(cur_arg)
             else:
                 new_args.append(a)
-        res_shape = broadcast_many([list(a.type.shape) for a in args if isinstance(a.type, TensorType)])
+        broadcast_shapes = [list(a.type.shape) for a in args if isinstance(a.type, TensorType)]
+        if len(broadcast_shapes) == 0:
+            return [], args, Value(res_dtype)
+        res_shape = broadcast_many(broadcast_shapes)
         res_val = Value(TensorType(res_dtype, tuple(res_shape)))
         self.influence[res_val] = res
         return cast(List[Operation], transforms), new_args, res_val
@@ -528,11 +544,12 @@ class DimensionInfluence:
 class TryVectorizeDimensionPass(PurePass):
     def __init__(self, args: Dict[Value, int]):
         super().__init__()
+        self.remapper = ArgRemapper()
         self.influence = DimensionInfluence()
         self.args = args
     
     def run_on_op(self, op: Operation) -> Operation:
-        op = super().run_on_op(op)
+        op = self.remapper.shallow_remap_op(op)
 
         if isinstance(op, (GridComputeOp, GridReduceOp)):
             assert len(op.blocks) == 1
@@ -540,7 +557,7 @@ class TryVectorizeDimensionPass(PurePass):
             for arg in block.args:
                 if arg in self.args:
                     new_arg = Value(TensorType(i32, (self.args[arg],)), arg.name_hint)
-                    self.remap(arg, new_arg)
+                    self.remapper.remap_value(arg, new_arg)
                     self.influence.add_influence(new_arg, new_arg)
                 elif isinstance(arg.type, TensorType):
                     self.influence.add_influence(arg, arg)
@@ -560,17 +577,20 @@ class TryVectorizeDimensionPass(PurePass):
                 res_dtype = res_type.dtype
             else:
                 assert False
-            transforms, new_args, res_val = self.influence.join(op.args, res_dtype)
-            self.remap(op.ret[0], res_val)
+            
+            # first of index op is the tensor, so not influencible
+            old_args = op.args if isinstance(op, ElementwiseOp) else op.args[1:]
+            transforms, new_args, res_val = self.influence.join(old_args, res_dtype)
+            self.remapper.remap_value(op.ret[0], res_val)
             self.insert_before(transforms)
             if isinstance(op, ElementwiseOp):
                 op = ElementwiseOp(op.elem_op, tuple(new_args))
                 op.ret = [res_val]
             else:
-                op = TensorIndexOp(new_args[0], tuple(new_args[1:]), res_val)
+                op = TensorIndexOp(op.args[0], tuple(new_args), res_val)
             return op
         
-        return op
+        return super().run_on_op(op)
 
 
 new_ir_module = PurePass().run_on_op(ir_module)
@@ -583,4 +603,8 @@ j = name_getter.get('%3')
 
 vec = TryVectorizeDimensionPass({i: 4, j: 4})
 vec_ir = vec.run_on_op(new_ir_module)
+print(ir.basic_verify_ir(ir_module))
+
+PrettyRenameValues().run_on_op(ir_module)
+print(ir_module)
 
