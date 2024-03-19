@@ -14,7 +14,7 @@ class ElementWiseOpCode:
     def type_check(self, types: List[DType]) -> bool:
         assert False
 
-    def result_type(self, types: List[DType]) -> DType:
+    def result_dtype(self, types: List[DType]) -> DType:
         assert False
 
     def name_of(self) -> str:
@@ -105,7 +105,7 @@ class UnaryOpCodes(ElementWiseOpCode, Enum):
         else:
             return ty.is_integral() or ty == i1
 
-    def result_type(self, types: List[DType]) -> DType:
+    def result_dtype(self, types: List[DType]) -> DType:
         assert self.type_check(types)
         return types[0]
 
@@ -125,7 +125,7 @@ class FloatIntrinsicOpCode(ElementWiseOpCode):
             return False
         return all(t == t1 for t in types)
 
-    def result_type(self, types: List[DType]) -> DType:
+    def result_dtype(self, types: List[DType]) -> DType:
         self.type_check(types)
         return types[0]
 
@@ -151,7 +151,7 @@ class ConstantOp(Operation):
             ty = f32
         super().__init__('constant', [], [], [Value(ty)])
 
-    def lower_attr(self) -> Optional[Attr]:
+    def attrs(self) -> Optional[Attr]:
         return Attr(val=self.py_constant)
 
 
@@ -166,17 +166,17 @@ class ElementwiseOp(Operation):
         super().__init__('elementwise', [], list(args), [ret])
         self.elem_op = op
 
-    def lower_attr(self) -> Optional[Attr]:
+    def attrs(self) -> Optional[Attr]:
         return Attr(op=self.elem_op.name_of())
     
     @staticmethod
     def get_res_type(op: ElementWiseOpCode, types: List[Type]) -> Type:
         if all(isinstance(t, DType) for t in types):
-            return op.result_type(cast(List[DType], types))
+            return op.result_dtype(cast(List[DType], types))
         assert all(isinstance(t, DType) or isinstance(t, TensorType) for t in types)
         dtypes_ = [t.dtype if isinstance(t, TensorType) else t for t in types]
         dtypes = cast(List[DType], dtypes_)
-        res_ty = op.result_type(dtypes)
+        res_ty = op.result_dtype(dtypes)
         shapes = [list(t.shape) if isinstance(t, TensorType) else [1] for t in types]
         
         return TensorType(res_ty, tuple(broadcast_many(shapes)))
@@ -201,7 +201,7 @@ class GridReduceOp(Operation):
         super().__init__('grid_reduce', [block], list(shape), [ret])
         self.reduction = reduction
 
-    def lower_attr(self) -> Optional[Attr]:
+    def attrs(self) -> Optional[Attr]:
         return Attr(reduction=self.reduction.name)
 
 
@@ -217,7 +217,7 @@ class TensorShapeOfOp(Operation):
         self.index = index
         super().__init__('shape_of', [], [tensor], [val])
 
-    def lower_attr(self) -> Optional[Attr]:
+    def attrs(self) -> Optional[Attr]:
         return Attr(index=self.index)
 
     def tied_to(self) -> Optional[Value]:
@@ -240,7 +240,7 @@ class IRFunctionOp(Operation):
         self.fn_name = name
         super().__init__('function', [body], [], [ret_var])
 
-    def lower_attr(self) -> Optional[Attr]:
+    def attrs(self) -> Optional[Attr]:
         return Attr(name=self.fn_name)
 
 

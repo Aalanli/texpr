@@ -1,4 +1,5 @@
 # %%
+from mypy_extensions import trait
 from typing import ClassVar, Dict, List, Optional, Callable, Sequence, Set, Tuple, Union
 from enum import Enum
 import gdsl.utils as utils
@@ -140,16 +141,66 @@ class Attr:
     def __hash__(self):
         return hash(str(self.attrs))
 
+@trait
+class Op:
+    def __hash__(self):
+        return id(self)
+    
+    def name(self) -> str:
+        assert False
+    
+    def operands(self) -> List[Value]:
+        assert False
 
-class Operation:
+    def returns(self) -> List[Value]:
+        assert False
+
+    def blocks(self) -> List['Block']:
+        assert False
+
+    def attrs(self) -> Optional[Attr]:
+        return None
+    
+    def replace_blocks(self, blocks: Dict['Block', 'Block']) -> 'Op':
+        return self
+    
+    def replace_returns(self, returns: Dict[Value, Value]) -> 'Op':
+        return self
+    
+    def replace_operands(self, operands: Dict[Value, Value]) -> 'Op':
+        return self
+
+
+class Operation(Op):
     def __init__(self, name: str, blocks: List['Block'], args: List['Value'], ret: List['Value']):
-        self.name: str = name
-        self.blocks: List['Block'] = blocks
+        self._name: str = name
+        self._blocks: List['Block'] = blocks
         self.args: List['Value'] = args
         self.ret: List['Value'] = ret
+    
+    def name(self) -> str:
+        return self._name
 
-    def lower_attr(self) -> Optional[Attr]:
-        return None
+    def operands(self) -> List[Value]:
+        return self.args
+    
+    def returns(self) -> List[Value]:
+        return self.ret
+    
+    def blocks(self) -> List['Block']:
+        return self._blocks
+    
+    def replace_blocks(self, blocks: Dict['Block', 'Block']) -> 'Operation':
+        new_blocks = [blocks.get(b, b) for b in self._blocks]
+        return Operation(self._name, new_blocks, self.args, self.ret)
+    
+    def replace_returns(self, returns: Dict[Value, Value]) -> 'Operation':
+        new_ret = [returns.get(r, r) for r in self.ret]
+        return Operation(self._name, self._blocks, self.args, new_ret)
+    
+    def replace_operands(self, operands: Dict[Value, Value]) -> 'Operation':
+        new_args = [operands.get(a, a) for a in self.args]
+        return Operation(self._name, self._blocks, new_args, self.ret)
 
     def __hash__(self):
         return id(self)
@@ -228,29 +279,29 @@ class IRPrinter:
     def dump_attr(self, attr: Attr) -> str:
         return '{|' + ' ,'.join([k + ': ' + self.dump_attr_ty(v) for k, v in attr.attrs.items()]) + '|}'
 
-    def dump_op_impl(self, ir: Operation) -> List[Line]:
-        arg = self.format_val_list(ir.args)
-        if len(ir.ret) > 0:
-            ret = self.format_val_list(ir.ret, type_annot=True)
-            if len(ir.ret) > 1:
+    def dump_op_impl(self, ir: Op) -> List[Line]:
+        arg = self.format_val_list(ir.operands())
+        if len(ir.returns()) > 0:
+            ret = self.format_val_list(ir.returns(), type_annot=True)
+            if len(ir.returns()) > 1:
                 ret = '(' + ret + ')'
-            header = Line(ret + ' = ' + ir.name + '(' + arg + ')')
+            header = Line(ret + ' = ' + ir.name() + '(' + arg + ')')
         else:
-            header = Line(ir.name + '(' + arg + ')')
+            header = Line(ir.name() + '(' + arg + ')')
         lines = [header]
-        attr = ir.lower_attr()
+        attr = ir.attrs()
         if attr is not None:
             line = ' ' + self.dump_attr(attr)
             lines[-1].line += line
         # the label
         if self.debug_labels:
             lines[-1].line += '%' + str(id(ir))
-        if len(ir.blocks) > 0:
+        if len(ir.blocks()) > 0:
             if len(lines[-1].line) > 50:
                 lines.append(Line('{'))
             else:
                 lines[-1].line += ' {'
-            for bk in ir.blocks:
+            for bk in ir.blocks():
                 lines.extend([l.indent() for l in self.dump_block_impl(bk)])
             lines.append(Line('}'))
         return lines
@@ -329,7 +380,7 @@ def basic_verify_ir(ir: Operation):
             if not is_defined(arg):
                 print(IRPrinter(highlight_value={arg}, debug_labels=True).dump_op(ir))
                 raise AssertionError("arg is not defined")
-        for b in op.blocks:
+        for b in op.blocks():
             add_scope()
             verify_block(b)
             pop_scope()
