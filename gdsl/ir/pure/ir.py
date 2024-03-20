@@ -2,7 +2,7 @@
 import copy
 from typing import ClassVar, Dict, List, Optional, Callable, Set, Tuple, Union, cast
 from enum import Enum
-from gdsl.ir.base_ir import Attr, List, Type
+from gdsl.ir.base_ir import Attr, Block, List, Operation, Type
 import gdsl.utils as utils
 from mypy_extensions import trait
 
@@ -242,7 +242,7 @@ class IRFunctionOp(Operation):
 
     def attrs(self) -> Optional[Attr]:
         return Attr(name=self.fn_name)
-
+    
 
 class IRModuleOp(Operation):
     def __init__(self, scope: Block):

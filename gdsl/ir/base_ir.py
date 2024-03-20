@@ -1,4 +1,5 @@
 # %%
+import copy
 from mypy_extensions import trait
 from typing import ClassVar, Dict, List, Optional, Callable, Sequence, Set, Tuple, Union
 from enum import Enum
@@ -169,6 +170,15 @@ class Op:
     
     def replace_operands(self, operands: Dict[Value, Value]) -> 'Op':
         return self
+    
+    def verify(self) -> bool:
+        return basic_verify_ir(self)
+    
+    def __str__(self) -> str:
+        return IRPrinter().dump_op(pretty_rename_values(self))
+    
+    def __repr__(self) -> str:
+        return str(self)
 
 
 class Operation(Op):
@@ -191,31 +201,24 @@ class Operation(Op):
         return self._blocks
     
     def replace_blocks(self, blocks: Dict['Block', 'Block']) -> 'Operation':
-        new_blocks = [blocks.get(b, b) for b in self._blocks]
-        return Operation(self._name, new_blocks, self.args, self.ret)
+        new_self = copy.copy(self)
+        new_self._blocks = [blocks.get(b, b) for b in self._blocks]
+        return new_self
     
     def replace_returns(self, returns: Dict[Value, Value]) -> 'Operation':
-        new_ret = [returns.get(r, r) for r in self.ret]
-        return Operation(self._name, self._blocks, self.args, new_ret)
+        new_self = copy.copy(self)
+        new_self.ret = [returns.get(r, r) for r in self.ret]
+        return new_self
     
     def replace_operands(self, operands: Dict[Value, Value]) -> 'Operation':
-        new_args = [operands.get(a, a) for a in self.args]
-        return Operation(self._name, self._blocks, new_args, self.ret)
-
-    def __hash__(self):
-        return id(self)
-
-    def __str__(self):
-        return IRPrinter().dump_op(self)
-
-    def __repr__(self) -> str:
-        return str(self)
-
+        new_self = copy.copy(self)
+        new_self.args = [operands.get(a, a) for a in self.args]
+        return new_self
 
 class Block:
-    def __init__(self, args: List['Value'], ops: List['Operation']):
+    def __init__(self, args: List['Value'], ops: List['Op']):
         self.args: List['Value'] = args
-        self.ops: List['Operation'] = ops
+        self.ops: List['Op'] = ops
 
     def __hash__(self):
         return id(self)
@@ -317,7 +320,7 @@ class IRPrinter:
         lines.append(Line('}'))
         return lines
 
-    def dump_op(self, ir: Operation) -> str:
+    def dump_op(self, ir: Op) -> str:
         return '\n'.join(x.line for x in self.dump_op_impl(ir))
 
     def dump_block(self, block: Block) -> str:
@@ -325,11 +328,11 @@ class IRPrinter:
 
 
 class InvalidIRException(Exception):
-    def __init__(self, ir: Operation, message: str, highlight_values: List[Value]) -> None:
+    def __init__(self, ir: Op, message: str, highlight_values: List[Value]) -> None:
         super().__init__(f"failed with {message} \n" + IRPrinter(highlight_value=set(highlight_values)).dump_op(ir))
 
 
-def basic_verify_ir(ir: Operation):
+def basic_verify_ir(ir: Op):
     """verifies the basic SSA properties"""
     val_scopes: List[Set[Value]] = [set()]
     # every op/block object is used once
@@ -373,10 +376,10 @@ def basic_verify_ir(ir: Operation):
         for op in b.ops:
             verify_op(op)
 
-    def verify_op(op: Operation):
+    def verify_op(op: Op):
         assert id(op) not in op_block_codes, "op object identify is used more than once"
         op_block_codes.add(id(op))
-        for arg in op.args:
+        for arg in op.operands():
             if not is_defined(arg):
                 print(IRPrinter(highlight_value={arg}, debug_labels=True).dump_op(ir))
                 raise AssertionError("arg is not defined")
@@ -384,7 +387,7 @@ def basic_verify_ir(ir: Operation):
             add_scope()
             verify_block(b)
             pop_scope()
-        for r in op.ret:
+        for r in op.returns():
             verify_src_name(r)
             assert not is_defined(r), "repeated op ret"
             assert r not in val_sources
@@ -400,3 +403,99 @@ def basic_verify_ir(ir: Operation):
         print(e)
         return False
     return True
+
+
+def fill_with_name(i: int) -> str:
+    ia = ord('a')
+    # 0->a, 25->z
+    # 26->aa,
+    n = ''
+    while True:
+        n += chr(ia + i % 26)
+        i = i // 26
+        if i <= 0:
+            break
+        i -= 1
+    return n[::-1]
+
+
+class PrettyRenameValues:
+    def __init__(self) -> None:
+        self.prefix_bases: Dict[str, int] = {'': 0}
+        self.unique_names: Set[str] = {''}
+        self.uid: int = 0
+
+    def generate_name(self, prefix: Optional[str] = None) -> str:
+        if prefix is None:
+            prefix = ''
+        if prefix not in self.prefix_bases:
+            self.prefix_bases[prefix] = 0
+            return prefix
+
+        max_base_len = 26**3 + 26**2 + 26
+        base = self.prefix_bases[prefix]
+        name = prefix + fill_with_name(base % max_base_len)
+        if base >= max_base_len:
+            name += str(base - max_base_len)
+        self.prefix_bases[prefix] += 1
+        return name
+
+    def generate_unique_name(self, prefix: Optional[str] = None) -> str:
+        name = self.generate_name(prefix)
+        while name in self.unique_names:
+            name = self.generate_name(prefix)
+        return name
+    
+    def generate_unique_block_name(self) -> str:
+        name = '%' + str(self.uid)
+        assert name not in self.unique_names
+        self.uid += 1
+        self.unique_names.add(name)
+        return name
+
+
+def renamer_on_block(namer: PrettyRenameValues, block: Block, remap: Dict[Value, Value]):
+    for arg in block.args:
+        new_arg = Value(arg.type, arg.name_hint)
+        new_arg.name = namer.generate_unique_block_name()
+        remap[arg] = new_arg
+    
+    for op in block.ops:
+        renamer_on_op(namer, op, remap)
+    
+
+def renamer_on_op(namer: PrettyRenameValues, op: Op, remap: Dict[Value, Value]):
+    prefix = op.name()[0] if len(op.name()) > 0 else ''
+
+    for rold in op.returns():
+        r = Value(rold.type, rold.name_hint)
+        if r.name_hint is None:
+            r.name = namer.generate_unique_name(prefix)
+        else:
+            r.name = namer.generate_unique_name(r.name_hint)
+    
+        remap[rold] = r
+    
+    for block in op.blocks():
+        renamer_on_block(namer, block, remap)
+
+
+def remap_op_values(op: Op, remap: Dict[Value, Value]) -> Op:
+    remap_blocks = {}
+    for old_block in op.blocks():
+        remap_blocks[old_block] = remap_block_values(old_block, remap)
+    
+    return op.replace_blocks(remap_blocks).replace_operands(remap).replace_returns(remap)
+
+
+def remap_block_values(block: Block, remap: Dict[Value, Value]) -> Block:
+    new_ops = [remap_op_values(op, remap) for op in block.ops]
+    new_args = [remap.get(arg, arg) for arg in block.args]
+    return Block(new_args, new_ops)
+
+
+def pretty_rename_values(op: Op) -> Op:
+    namer = PrettyRenameValues()
+    remap: Dict[Value, Value] = {}
+    renamer_on_op(namer, op, remap)
+    return remap_op_values(op, remap)

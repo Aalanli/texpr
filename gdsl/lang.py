@@ -20,19 +20,19 @@ class BlockBuilder:
 
 class IRBuilder:
     def __init__(self) -> None:
-        self.cur_block: List[List[ir.Operation]] = [[]]
+        self.cur_block: List[List[ir.Op]] = [[]]
         # ensures every operation added is unique, id(op)
         self.op_set: Set[int] = set()
         # ensures functions do not recurse
         self.fn_scope: List[Tuple[int, str]] = []  # (id, name)
 
-    def add_op(self, op: ir.Operation):
+    def add_op(self, op: ir.Op):
         if id(op) in self.op_set:
             raise RuntimeError("op is already inserted")
         self.cur_block[-1].append(op)
         self.op_set.add(id(op))
 
-    def add_global_op(self, op: ir.Operation):
+    def add_global_op(self, op: ir.Op):
         if id(op) in self.op_set:
             raise RuntimeError("op is already inserted")
         self.cur_block[0].append(op)
@@ -59,7 +59,7 @@ class IRBuilder:
         block = self.cur_block.pop()
         return ir.IRModuleOp(ir.Block([], block))
 
-    def finish_ops(self) -> List[ir.Operation]:
+    def finish_ops(self) -> List[ir.Op]:
         assert len(self.cur_block) == 1
         return self.cur_block.pop()
 
