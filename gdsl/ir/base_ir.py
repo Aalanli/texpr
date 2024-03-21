@@ -142,14 +142,15 @@ class Attr:
     def __hash__(self):
         return hash(str(self.attrs))
 
+
 @trait
 class Op:
     def __hash__(self):
         return id(self)
-    
+
     def name(self) -> str:
         assert False
-    
+
     def operands(self) -> List[Value]:
         assert False
 
@@ -161,22 +162,22 @@ class Op:
 
     def attrs(self) -> Optional[Attr]:
         return None
-    
+
     def replace_blocks(self, blocks: Dict['Block', 'Block']) -> 'Op':
         return self
-    
+
     def replace_returns(self, returns: Dict[Value, Value]) -> 'Op':
         return self
-    
+
     def replace_operands(self, operands: Dict[Value, Value]) -> 'Op':
         return self
-    
+
     def verify(self) -> bool:
         return basic_verify_ir(self)
-    
+
     def __str__(self) -> str:
         return IRPrinter().dump_op(pretty_rename_values(self))
-    
+
     def __repr__(self) -> str:
         return str(self)
 
@@ -187,33 +188,34 @@ class Operation(Op):
         self._blocks: List['Block'] = blocks
         self.args: List['Value'] = args
         self.ret: List['Value'] = ret
-    
+
     def name(self) -> str:
         return self._name
 
     def operands(self) -> List[Value]:
         return self.args
-    
+
     def returns(self) -> List[Value]:
         return self.ret
-    
+
     def blocks(self) -> List['Block']:
         return self._blocks
-    
+
     def replace_blocks(self, blocks: Dict['Block', 'Block']) -> 'Operation':
         new_self = copy.copy(self)
         new_self._blocks = [blocks.get(b, b) for b in self._blocks]
         return new_self
-    
+
     def replace_returns(self, returns: Dict[Value, Value]) -> 'Operation':
         new_self = copy.copy(self)
         new_self.ret = [returns.get(r, r) for r in self.ret]
         return new_self
-    
+
     def replace_operands(self, operands: Dict[Value, Value]) -> 'Operation':
         new_self = copy.copy(self)
         new_self.args = [operands.get(a, a) for a in self.args]
         return new_self
+
 
 class Block:
     def __init__(self, args: List['Value'], ops: List['Op']):
@@ -445,7 +447,7 @@ class PrettyRenameValues:
         while name in self.unique_names:
             name = self.generate_name(prefix)
         return name
-    
+
     def generate_unique_block_name(self) -> str:
         name = '%' + str(self.uid)
         assert name not in self.unique_names
@@ -459,10 +461,10 @@ def renamer_on_block(namer: PrettyRenameValues, block: Block, remap: Dict[Value,
         new_arg = Value(arg.type, arg.name_hint)
         new_arg.name = namer.generate_unique_block_name()
         remap[arg] = new_arg
-    
+
     for op in block.ops:
         renamer_on_op(namer, op, remap)
-    
+
 
 def renamer_on_op(namer: PrettyRenameValues, op: Op, remap: Dict[Value, Value]):
     prefix = op.name()[0] if len(op.name()) > 0 else ''
@@ -473,9 +475,9 @@ def renamer_on_op(namer: PrettyRenameValues, op: Op, remap: Dict[Value, Value]):
             r.name = namer.generate_unique_name(prefix)
         else:
             r.name = namer.generate_unique_name(r.name_hint)
-    
+
         remap[rold] = r
-    
+
     for block in op.blocks():
         renamer_on_block(namer, block, remap)
 
@@ -484,7 +486,7 @@ def remap_op_values(op: Op, remap: Dict[Value, Value]) -> Op:
     remap_blocks = {}
     for old_block in op.blocks():
         remap_blocks[old_block] = remap_block_values(old_block, remap)
-    
+
     return op.replace_blocks(remap_blocks).replace_operands(remap).replace_returns(remap)
 
 

@@ -21,6 +21,7 @@ def matmul_add(N, L, M, dtype):
 
     return [A, B, C, out]
 
+
 target = tvm.target.Target("cuda")
 N = L = M = 4096
 task = auto_scheduler.SearchTask(func=matmul_add, args=(N, L, M, "float32"), target=target)
@@ -31,9 +32,7 @@ print(task.compute_dag)
 
 log_file = "matmul.json"
 tune_option = auto_scheduler.TuningOptions(
-    num_measure_trials=1000,
-    measure_callbacks=[auto_scheduler.RecordToFile(log_file)],
-    verbose=2,
+    num_measure_trials=1000, measure_callbacks=[auto_scheduler.RecordToFile(log_file)], verbose=2
 )
 
 # Run auto-tuning (search)
@@ -63,10 +62,7 @@ np.testing.assert_allclose(out_np, out_tvm.numpy(), rtol=1e-3)
 
 # Evaluate execution time.
 evaluator = func.time_evaluator(func.entry_name, dev, min_repeat_ms=500)
-print(
-    "Execution time of this operator: %.3f ms"
-    % (np.median(evaluator(a_tvm, b_tvm, c_tvm, out_tvm).results) * 1000)
-)
+print("Execution time of this operator: %.3f ms" % (np.median(evaluator(a_tvm, b_tvm, c_tvm, out_tvm).results) * 1000))
 
 import triton
 import torch

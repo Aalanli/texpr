@@ -20,12 +20,16 @@ class ElementWiseOpCode:
     def name_of(self) -> str:
         assert False
 
+
 Dim = List[Optional[int]]
+
+
 def broadcast_many(shapes: List[Dim]) -> Dim:
     shape = shapes[0]
     for i in range(1, len(shapes)):
         shape = broadcast(shape, shapes[i])
     return shape
+
 
 def broadcast(sh1: Dim, sh2: Dim) -> Dim:
     if len(sh1) < len(sh2):
@@ -42,6 +46,7 @@ def broadcast(sh1: Dim, sh2: Dim) -> Dim:
         else:
             new_shape.append(None)
     return new_shape
+
 
 class BinaryOpCodes(ElementWiseOpCode, Enum):
     Add = 0
@@ -168,7 +173,7 @@ class ElementwiseOp(Operation):
 
     def attrs(self) -> Optional[Attr]:
         return Attr(op=self.elem_op.name_of())
-    
+
     @staticmethod
     def get_res_type(op: ElementWiseOpCode, types: List[Type]) -> Type:
         if all(isinstance(t, DType) for t in types):
@@ -178,7 +183,7 @@ class ElementwiseOp(Operation):
         dtypes = cast(List[DType], dtypes_)
         res_ty = op.result_dtype(dtypes)
         shapes = [list(t.shape) if isinstance(t, TensorType) else [1] for t in types]
-        
+
         return TensorType(res_ty, tuple(broadcast_many(shapes)))
 
 
@@ -242,7 +247,7 @@ class IRFunctionOp(Operation):
 
     def attrs(self) -> Optional[Attr]:
         return Attr(name=self.fn_name)
-    
+
 
 class IRModuleOp(Operation):
     def __init__(self, scope: Block):

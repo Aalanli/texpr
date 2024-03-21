@@ -5,6 +5,7 @@ from tvm import te
 import numpy as np
 from tvm import te, auto_scheduler
 
+
 @auto_scheduler.register_workload  # Note the auto_scheduler decorator
 def sum():
     n = te.var("n")
@@ -13,6 +14,7 @@ def sum():
     C = te.compute(A.shape, lambda i: A[i] + B[i], name="C")
 
     return [A, B, C]
+
 
 target = tvm.target.Target("cuda")
 task = auto_scheduler.SearchTask(func=sum, args=(), target=target)
@@ -23,9 +25,7 @@ print(task.compute_dag)
 
 log_file = "sum.json"
 tune_option = auto_scheduler.TuningOptions(
-    num_measure_trials=10,
-    measure_callbacks=[auto_scheduler.RecordToFile(log_file)],
-    verbose=2,
+    num_measure_trials=10, measure_callbacks=[auto_scheduler.RecordToFile(log_file)], verbose=2
 )
 
 # Run auto-tuning (search)
