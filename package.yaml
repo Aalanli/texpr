@@ -1,0 +1,102 @@
+name:                texpr
+version:             0.1.0.0
+github:              "githubuser/texpr"
+license:             BSD-3-Clause
+author:              "Author name here"
+maintainer:          "example@example.com"
+copyright:           "2024 Author name here"
+
+extra-source-files:
+- README.md
+- CHANGELOG.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/githubuser/texpr#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- mtl
+- random
+- hegg
+- prettyprinter
+- text
+- containers
+- vector
+- megaparsec
+
+ghc-options:
+- -Wall
+- -Wcompat
+- -Widentities
+- -Wincomplete-record-updates
+- -Wincomplete-uni-patterns
+- -Wmissing-export-lists
+- -Wmissing-home-modules
+- -Wpartial-fields
+- -Wredundant-constraints
+
+library:
+  source-dirs: src
+  exposed-modules: 
+    - TExpr
+    - IExpr
+
+executables:
+  texpr-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -O2
+    dependencies:
+    - texpr
+
+tests:
+  texpr-test:
+    main:                Spec.hs
+    source-dirs:         test/test1
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - texpr
+  texpr-test2:
+    main:                Spec2.hs
+    source-dirs:         test/test2
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - texpr
+
+# benchmarks:
+#   map:
+#     main: Map.hs
+#     source-dirs: benchmarks
+#     ghc-options:
+#     - -O2
+#     - -threaded
+#     - -rtsopts
+#     - -with-rtsopts=-N
+#     dependencies:
+#     - bytestring
+#     - containers
+#     - criterion
+#     - deepseq
+#     - hashable
+#     - mwc-random >= 0.13.1
+#     - unordered-containers
+#     - vector
+#     - vector-algorithms
+
+default-extensions: OverloadedStrings, LambdaCase
