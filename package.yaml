@@ -23,7 +23,7 @@ dependencies:
 - base >= 4.7 && < 5
 - mtl
 - random
-- hegg
+# - hegg
 - prettyprinter
 - text
 - containers
@@ -44,8 +44,9 @@ ghc-options:
 library:
   source-dirs: src
   exposed-modules: 
-    - TExpr
+    - TExpr2
     - IExpr
+    - Util
 
 executables:
   texpr-exe:
@@ -55,48 +56,20 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
-    - -O2
     dependencies:
     - texpr
+    - pretty-simple
 
 tests:
-  texpr-test:
-    main:                Spec.hs
-    source-dirs:         test/test1
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
+  test:
+    main: Driver.hs
+    source-dirs: test/test
     dependencies:
     - texpr
-  texpr-test2:
-    main:                Spec2.hs
-    source-dirs:         test/test2
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    dependencies:
-    - texpr
+    - tasty
+    - tasty-hunit
+    - tasty-discover
+    - tasty-quickcheck
 
-# benchmarks:
-#   map:
-#     main: Map.hs
-#     source-dirs: benchmarks
-#     ghc-options:
-#     - -O2
-#     - -threaded
-#     - -rtsopts
-#     - -with-rtsopts=-N
-#     dependencies:
-#     - bytestring
-#     - containers
-#     - criterion
-#     - deepseq
-#     - hashable
-#     - mwc-random >= 0.13.1
-#     - unordered-containers
-#     - vector
-#     - vector-algorithms
 
 default-extensions: OverloadedStrings, LambdaCase

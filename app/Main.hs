@@ -1,194 +1,163 @@
-{-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE DeriveFunctor #-}
-
-
-import Control.Monad.Except
-
-import Data.Text (unpack, pack)
-import qualified Data.Vector as Vec
-import Data.Map (Map)
-import qualified Data.Map as Map
-import qualified Data.Set as Set
-
-import TExpr
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
+{-# LANGUAGE OverloadedLists #-}
 import IExpr
 
+import Util
+import TExpr2
+import Data.Text (unpack)
+import Data.Sequence (fromList)
+import Text.Pretty.Simple
 
-matmul :: TTerm -> TTerm -> TEBuilder TTerm
-matmul a b = do
-    sa <- calcShape a
-    sb <- calcShape b
-    when (sa /= sb) $ do
-        throwError "matmul shape mismatch"
-    tcompute 1024 (\i ->
-        tcompute 1024 (\j ->
-            treduce 1024 (\k -> do
-                ai <- tindex a ((i `imul` 1024) `iadd` k)
-                bi <- tindex b ((k `imul` 1024) `iadd` j)
-                telemwise "add" [ai, bi]
-            )))
-
-data Conv2DConfig = Conv2DConfig {
-    batch::Int,
-    channelIn::Int,
-    imHeight::Int,
-    imWidth::Int,
-    channelOut::Int,
-    filterX::Int,
-    filterY::Int,
-    dilX::Int,
-    dilY::Int,
-    strideX::Int,
-    strideY::Int
+data Tensor = Tensor {
+    tensorShape::[Int],
+    tensorStride::[Int],
+    indexOffsets::[ITerm],
+    tensorDim::Int,
+    tensorVar::TVar
 }
 
-indexRowMajor :: [Int] -> [ITerm] -> ITerm
-indexRowMajor dims coords =
-    let strides = tail $ scanr (*) 1 dims
-    in foldl iadd (iconst 0) $ zipWith imul coords strides
+strides = tail . scanr (*) 1
 
-conv2d :: Conv2DConfig -> TTerm -> TTerm -> TEBuilder TTerm
-conv2d c im f = do
-    sIm <- calcShape im
-    sF <- calcShape f
-    let imDims = [c.batch, c.channelIn, c.imHeight, c.imWidth]
-    let fDims = [c.channelOut, c.channelIn, c.filterY, c.filterX]
-    when (sIm /= product imDims) $ do
-        throwError $ pack $ "im shape mismatch, im dims" ++ show sIm ++ "!=" ++ show (product imDims)
-    when (sF /= product fDims) $ do
-        throwError "filter shape mismatch"
-    let p = (c.imHeight - c.dilX * (c.strideX - 1) - 1) `div` c.strideX + 1
-    let q = (c.imWidth - c.dilY * (c.strideY - 1) - 1) `div` c.strideY + 1
-    tcompute c.batch (\ib ->
-        tcompute c.channelOut (\ic ->
-            tcompute p (\ip ->
-                tcompute q (\iq ->
-                    treduce c.channelIn (\jc ->
-                        treduce c.filterX (\jx ->
-                            treduce c.filterY (\jy -> do
-                                imx <- tindex im (indexRowMajor imDims
-                                    [ib, jc,
-                                     (ip `imul` c.strideX) `iadd` (jx `imul` c.dilX),
-                                     (iq `imul` c.strideY) `iadd` (jy `imul` c.dilY)])
-                                fx <- tindex f (indexRowMajor fDims [ic, jc, jx, jy])
-                                telemwise "mul" [imx, fx]
-                            )))))))
+mkTensor :: TVar -> [Int] -> Tensor
+mkTensor tvar shape = Tensor shape (strides shape) (map (const (iConst 0)) shape) (length shape) tvar
 
-progMatmul = do
-    a <- tvar (1024 * 1024)
-    b <- tvar (1024 * 1024)
-    matmul a b
+newTensor :: IDEnv m => MemoryLevel -> [Int] -> m Tensor
+newTensor m shape = let size = product shape in
+    do 
+        t <- tVar m size
+        return $ mkTensor t shape
 
-progConv2d = do
-    im <- tvar (4 * 64 * 512 * 512)
-    f <- tvar (128 * 64 * 3 * 3)
-    let conv = Conv2DConfig {
-        batch=4,
-        channelIn=64,
-        imHeight=512,
-        imWidth=512,
-        channelOut=128,
-        filterX=3,
-        filterY=3,
-        dilX=1,
-        dilY=1,
-        strideX=1,
-        strideY=1
+(@!) :: Tensor -> [ITerm] -> TTerm2
+tvar @! indices
+    | length (tensorStride tvar) /= length indices = error "Indexing error"
+    | otherwise = let 
+        i = foldl1 (.+) $ zipWith (.*) (map iConst $ tensorStride tvar) (zipWith (.+) indices (indexOffsets tvar)) in
+        Fix $ Index (tensorVar tvar) i
+
+-- dim offset, dim size
+dynSlice :: Tensor -> [(ITerm, Int)] -> Tensor
+dynSlice tvar slices
+    | not isSizeWellDefined || (length (tensorShape tvar) /= length slices) = error "invalid slice"
+    | otherwise = Tensor newShape (strides newShape) (map fst slices) (tensorDim tvar) (tensorVar tvar)
+    where 
+        newShape = map snd slices
+        isSizeWellDefined = and $ zipWith (<=) newShape (tensorShape tvar)
+
+factorIdx :: ITerm -> [Int] -> [ITerm]
+factorIdx i shapes = let 
+    shTerms = map iConst shapes
+    stTerms = map iConst (strides shapes) in
+    init $ scanr (\(sh, st) i' -> (i' ./ st) .% sh) i (zip shTerms stTerms)
+
+
+mmaTile :: IDEnv m => Tensor -> Tensor -> m TTerm2
+mmaTile at bt
+    | tensorDim at /= 2 || tensorDim bt /= 2 = error "incorrect dim"
+    | k /= k' = error "incorrect shape"
+    | otherwise = do
+        idx <- newIndex sT
+        rIdx <- newIndex k
+        wBM <- makeIFunc [sT] head
+        cM <- makeIFunc [1, sT] $ \[_, r] -> r
+        rMap <- makeIFunc [1, k] $ \[_, s] -> s
+        let cattr = ComputeAttr 
+                { computeRepeats = m * n
+                , computeParallel = 1
+                , computeIndex = idx
+                , computeWriteBackMap = wBM
+                , computeMap = cM
+                }
+        let rattr = ReduceAttr {
+            reduceIndex = rIdx,
+            reduceParallel = 1,
+            reduceSequential = k,
+            reduceMap = rMap
+        }
+        let [mi, ni] = factorIdx (Fix (I idx)) [m, n]
+        let ki = Fix (I rIdx)
+
+        let ai = at @! [mi, ki]
+        let bi = bt @! [ki, ni]
+        let ci = Fix $ ElemWise "add" $ fromList [ai, bi]
+        return $ Fix $ Compute cattr $ Fix 
+            $ Reduce rattr ci
+    where 
+        [m, k] = tensorShape at
+        [k', n] = tensorShape bt
+
+        sT = m * n
+
+data MMATileConfig = MMATileConfig 
+    { mTile::Int
+    , nTile::Int
+    , kTile::Int
+    , mWorker::Int
+    , nWorker::Int
     }
-    conv2d conv im f
 
+mmaOuterTile :: IDEnv m => 
+    MMATileConfig 
+        -> Tensor 
+        -> Tensor 
+        -> (Tensor -> Tensor -> m TTerm2) -> m TTerm2
+mmaOuterTile tile at bt f = do
+    cIdx <- newIndex (tN * tM)
+    rIdx <- newIndex (k `div` kTile tile)
+    cWBMap <- makeIFunc [tN * tM] $ \[i] -> let 
+        cthTile = i ./ iConst cTileSize
+        ic = i .% iConst cTileSize
+        icm = ic ./ iConst (nTile tile)
+        icn = ic .% iConst (nTile tile)
+        jcm = cthTile ./ iConst tN
+        jcn = cthTile .% iConst tN
+        in (icm .+ jcm) .* iConst n .+ icn .+ jcn
+    cMap <- makeIFunc [mWorker tile * nWorker tile, mSeq * nSeq] $ \[i, j] -> let
+        iM = i ./ iConst (nWorker tile)
+        iN = i .% iConst (nWorker tile)
+        jM = j ./ iConst nSeq
+        jN = j .% iConst nSeq
+        in (iM .+ jM) .* iConst tN .+ iN .+ jN
+    let cAttr = ComputeAttr {
+            computeWriteBackMap = cWBMap,
+            computeMap = cMap,
+            computeRepeats = mSeq * nSeq,
+            computeParallel = mWorker tile * nWorker tile,
+            computeIndex = cIdx
+        }
+    rMap <- makeIFunc [1, reduceK] $ \[_, ik] -> ik
+    let rAttr = ReduceAttr
+            { reduceMap = rMap
+            , reduceParallel = 1
+            , reduceSequential = reduceK
+            , reduceIndex = rIdx }
+    let cI = Fix (I cIdx)
+    let indM = cI ./ iConst (nTile tile)
+    let indN = cI .% iConst (nTile tile)
+    let indK = Fix (I rIdx)
+    let atSlice = at `dynSlice` [(indM, mTile tile), (indK, kTile tile)]
+    let btSlice = bt `dynSlice` [(indK, kTile tile), (indN, nTile tile)]
+    inner <- f atSlice btSlice
+    return $ Fix $ Compute cAttr $ Fix $ Reduce rAttr inner
+    where
+        [m, k] = tensorShape at
+        [k', n] = tensorShape bt
+        cTileSize = mTile tile * nTile tile
+        tN = (n `div` nTile tile)
+        tM = (m `div` mTile tile)
+        mSeq = m `div` (mTile tile * mWorker tile)
+        nSeq = n `div` (nTile tile * nWorker tile)
+        reduceK = k `div` kTile tile
 
-pprintProg :: TEBuilder TTerm -> String
-pprintProg prog = unpack $ case runTEBuilder prog of
-    Right e -> showTTerm e
-    Left e -> e
+testMMATile :: (IDEnv m) => m TTerm2
+testMMATile = do
+    at <- newTensor Reg [64, 32]
+    bt <- newTensor Reg [32, 16]
+    mmaTile at bt        
 
-
-main :: IO ()
 main = do
-    print ""
-    putStrLn $ pprintProg progMatmul
-    putStrLn $ pprintProg progConv2d
-    -- let exprSTree = map (pruneSTree 3) (genSearch 5 (ID 0) 32)
-    -- print $ map (estimateTerms) exprSTree
-    -- let bijections = Map.toList $ mergeT $ map (Map.filterWithKey (\k _ -> Vec.length k > 1 && isBijection k) . reifySTree) exprSTree
-    -- mapM_ (\(v, e) -> do
-    --     print $ showITerm e
-    --     print v) bijections
-
-
-isTerminal (I _ _) = True
-isTerminal (IConst _) = True
-isTerminal _ = False
-
-itermSize = cata (\case
-    I _ _ -> 1
-    IConst _ -> 1
-    a -> sum a)
-
-newtype IExprChoices i = IChoices {unChoice::IExpr [i]} deriving (Show, Functor)
-type IExprTree = Fix IExprChoices
-
-isBijection v = let
-    n = Vec.length v
-    in n == Set.size (Set.fromList $ filter (\i -> 0 <= i && i < n) (Vec.toList v))
-
-genSearch n i d = searchTree
-    where
-        constants = [IConst t | t <- [1..n]]
-        terminals = I i d : constants
-        termsTree = map (Fix . IChoices) (tail terminals)
-        searchTerms = terminals ++ [
-                Add searchTree searchTree
-                , Sub searchTree searchTree
-                , Mul searchTree termsTree
-                , Div searchTree termsTree
-                , Mod searchTree termsTree
-            ]
-        searchTree = map (Fix . IChoices) searchTerms
-
-
-pruneSTree :: Int -> IExprTree -> IExprTree
-pruneSTree depth (Fix (IChoices e)) = Fix $ IChoices $ lower e
-    where
-        lower = fmap (\xs -> if depth == 1 then
-            filter (isTerminal . unChoice . unFix) xs
-            else map (pruneSTree (depth - 1)) xs)
-
-minTerm a b
-    | itermSize a < itermSize b = a
-    | otherwise = b
-mergeM a b = foldr (\(x, e) m -> case Map.lookup x m of
-    Just e' -> Map.insert x (minTerm e e') m
-    Nothing -> Map.insert x e m) a (Map.toList b)
-mergeT = foldr mergeM Map.empty
-
-estimateTerms :: IExprTree -> Integer
-estimateTerms = cata (\(IChoices xs) -> foldr ((*) . sum) 1 xs)
-
-reifySTree :: IExprTree -> Map (Vec.Vector Int) ITerm
-reifySTree = cata (\(IChoices xs) -> let
-   merged = fmap mergeT xs
-   in reifySTree' merged)
-    where
-        broadcast f a b
-            | Vec.length a == 1 = Vec.map (f (a Vec.! 0)) b
-            | Vec.length b == 1 = broadcast (flip f) b a
-            | Vec.length a == Vec.length b = Vec.zipWith f a b
-            | otherwise = error "broadcast error: vecs different shape"
-        
-
-        interpT f c a b = let
-            prod = (,) <$> Map.toList a <*> Map.toList b
-            val = map (\((v1, e1), (v2, e2)) -> (broadcast f v1 v2, Fix $ c e1 e2)) prod
-            in Map.fromList val
-        reifySTree' :: IExpr (Map (Vec.Vector Int) ITerm) -> Map (Vec.Vector Int) ITerm
-        reifySTree' (I i n) = Map.singleton (Vec.generate n id) (Fix $ I i n)
-        reifySTree' (IConst i) = Map.singleton (Vec.fromList [i]) (Fix $ IConst i)
-        reifySTree' (Add a b) = interpT (+) Add a b
-        reifySTree' (Sub a b) = interpT (-) Sub a b
-        reifySTree' (Mul a b) = interpT (*) Mul a b
-        reifySTree' (Div a b) = interpT div Div a b
-        reifySTree' (Mod a b) = interpT mod Mod a b
-
+    let mma = runSimpleIDEnv testMMATile
+    let opt = defaultOutputOptionsDarkBg 
+            { outputOptionsCompact = True
+            , outputOptionsIndentAmount = 2 }
+    pPrintOpt NoCheckColorTty opt mma
 

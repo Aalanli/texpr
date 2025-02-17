@@ -1,7 +1,5 @@
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
-module IExpr.Parse (
-    parseIExpr, parsePat
-) where
+module IExpr.Parse where
 
 import Control.Monad.Trans
 import Data.Void
@@ -10,12 +8,10 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as Lex
 import Data.Text ( Text )
-
-import Data.Equality.Matching.Pattern
-import Data.Equality.Utils
-import IExpr.Internal
 import Control.Monad.Identity
 
+import IExpr.Internal
+import Util
 
 type ParserT m = ParsecT Void Text m
 
@@ -34,54 +30,26 @@ symbol = Lex.symbol sc
 pParens :: ParserT m a -> ParserT m a
 pParens = between (symbol "(") (symbol ")")
 
-pVar :: ParserT m (Pattern IExpr)
-pVar = (lexeme . try) p
-    where
-        p = fmap (VariablePattern . hashString) $ (:) <$> letterChar
-                <*> many (alphaNumChar <|> single '_')
+pIndex :: (IDEnv m) => ParserT m Index
+pIndex = do
+    _ <- symbol "i" *> many numberChar *> symbol "<"
+    width <- Lex.decimal
+    _ <- symbol ">"
+    lift $ newIndex width
 
-tVar :: (Monad m) => ParserT (TIEnv m) ITerm
-tVar = (lexeme . try) p
-    where
-        p = do
-            _ <- letterChar
-            _ <- many (alphaNumChar <|> single '_')
-            _ <- sc
-            n <- lexeme Lex.decimal
-            i <- lift newID
-            return (Fix (I i n))
-
-iexprPat :: ParserT m (Pattern IExpr)
-iexprPat = pat . IConst <$> lexeme Lex.decimal
-    <|> pVar
-    <|> try (binop "+" Add)
-    <|> try (binop "-" Sub)
-    <|> try (binop "*" Mul)
-    <|> try (binop "/" Div)
-    <|> binop "%" Mod
-    where
-        binop c f = pParens (fmap pat $ f <$> iexprPat <* symbol c <*> iexprPat )
-
-iexprFix :: (Monad m) => ParserT (TIEnv m) ITerm
+iexprFix :: (IDEnv m) => ParserT m ITerm
 iexprFix = Fix . IConst <$> lexeme Lex.decimal
-    <|> try tVar
+    <|> try (Fix . I <$> pIndex)
     <|> try (binop "+" Add)
     <|> try (binop "-" Sub)
     <|> try (binop "*" Mul)
     <|> try (binop "/" Div)
-    <|> binop "%" Mod
     where
         binop c f = pParens (fmap Fix $ f <$> iexprFix <* symbol c <*> iexprFix )
 
-parsePat :: Text -> Pattern IExpr
-parsePat t = case runParser iexprPat "" t of
-    Right p -> p
-    Left e -> error (errorBundlePretty e)
-
-parseIExpr :: Text -> ITerm
-parseIExpr t = runIdentity $ evalTIEnv env
+parseIExpr :: IDEnv m => Text -> m ITerm
+parseIExpr t = env
     where 
-        env :: TIEnv Identity ITerm
         env = do
             r <- runParserT iexprFix "" t
             case r of

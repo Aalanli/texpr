@@ -25,16 +25,14 @@ source-repository head
 
 library
   exposed-modules:
-      TExpr
+      TExpr2
       IExpr
+      Util
   other-modules:
-      DynESat
-      DynRewrite
       Frontend
       IExpr.Internal
       IExpr.Parse
-      IExpr.Random
-      TExpr2
+      Transforms
       Paths_texpr
   autogen-modules:
       Paths_texpr
@@ -46,7 +44,6 @@ library
   build-depends:
       base >=4.7 && <5
     , containers
-    , hegg
     , megaparsec
     , mtl
     , prettyprinter
@@ -65,15 +62,44 @@ executable texpr-exe
       app
   default-extensions:
       OverloadedStrings, LambdaCase
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -O2
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , containers
-    , hegg
+    , megaparsec
+    , mtl
+    , pretty-simple
+    , prettyprinter
+    , random
+    , texpr
+    , text
+    , vector
+  default-language: Haskell2010
+
+test-suite test
+  type: exitcode-stdio-1.0
+  main-is: Driver.hs
+  other-modules:
+      Prog1
+      Paths_texpr
+  autogen-modules:
+      Paths_texpr
+  hs-source-dirs:
+      test/test
+  default-extensions:
+      OverloadedStrings, LambdaCase
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      base >=4.7 && <5
+    , containers
     , megaparsec
     , mtl
     , prettyprinter
     , random
+    , tasty
+    , tasty-discover
+    , tasty-hunit
+    , tasty-quickcheck
     , texpr
     , text
     , vector
@@ -94,7 +120,6 @@ test-suite texpr-test
   build-depends:
       base >=4.7 && <5
     , containers
-    , hegg
     , megaparsec
     , mtl
     , prettyprinter
@@ -104,9 +129,9 @@ test-suite texpr-test
     , vector
   default-language: Haskell2010
 
-test-suite texpr-test2
+test-suite texpr2
   type: exitcode-stdio-1.0
-  main-is: Spec2.hs
+  main-is: Texpr2Test.hs
   other-modules:
       Paths_texpr
   autogen-modules:
@@ -115,11 +140,10 @@ test-suite texpr-test2
       test/test2
   default-extensions:
       OverloadedStrings, LambdaCase
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
     , containers
-    , hegg
     , megaparsec
     , mtl
     , prettyprinter
