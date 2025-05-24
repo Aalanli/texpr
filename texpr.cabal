@@ -32,6 +32,8 @@ library
       Frontend
       IExpr.Internal
       IExpr.Parse
+      TExpr1
+      TExpr3
       Transforms
       Paths_texpr
   autogen-modules:
@@ -44,6 +46,7 @@ library
   build-depends:
       base >=4.7 && <5
     , containers
+    , hashable
     , megaparsec
     , mtl
     , prettyprinter
@@ -66,6 +69,7 @@ executable texpr-exe
   build-depends:
       base >=4.7 && <5
     , containers
+    , hashable
     , megaparsec
     , mtl
     , pretty-simple
@@ -92,6 +96,7 @@ test-suite test
   build-depends:
       base >=4.7 && <5
     , containers
+    , hashable
     , megaparsec
     , mtl
     , prettyprinter
@@ -100,54 +105,6 @@ test-suite test
     , tasty-discover
     , tasty-hunit
     , tasty-quickcheck
-    , texpr
-    , text
-    , vector
-  default-language: Haskell2010
-
-test-suite texpr-test
-  type: exitcode-stdio-1.0
-  main-is: Spec.hs
-  other-modules:
-      Paths_texpr
-  autogen-modules:
-      Paths_texpr
-  hs-source-dirs:
-      test/test1
-  default-extensions:
-      OverloadedStrings, LambdaCase
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
-  build-depends:
-      base >=4.7 && <5
-    , containers
-    , megaparsec
-    , mtl
-    , prettyprinter
-    , random
-    , texpr
-    , text
-    , vector
-  default-language: Haskell2010
-
-test-suite texpr2
-  type: exitcode-stdio-1.0
-  main-is: Texpr2Test.hs
-  other-modules:
-      Paths_texpr
-  autogen-modules:
-      Paths_texpr
-  hs-source-dirs:
-      test/test2
-  default-extensions:
-      OverloadedStrings, LambdaCase
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
-  build-depends:
-      base >=4.7 && <5
-    , containers
-    , megaparsec
-    , mtl
-    , prettyprinter
-    , random
     , texpr
     , text
     , vector

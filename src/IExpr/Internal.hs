@@ -3,7 +3,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 module IExpr.Internal (
     Index, indexBound, indexID,
-    IDom (..),
     IExpr (..), ITerm,
     newIndex,
     pprintID, pprintIDSimple,
@@ -16,27 +15,6 @@ import Util
 import Prettyprinter
 import Prettyprinter.Render.Text
 import Data.Text (Text, unpack)
-
-class IDom i where
-    index :: IDEnv f => Int -> f i
-    iConst :: Int -> i
-    iAdd :: i -> i -> i
-    iSub :: i -> i -> i
-    iMul :: i -> i -> i
-    iDiv :: i -> i -> i
-    iMod :: i -> i -> i
-    iMod a b = a `iSub` ((a `iDiv` b) `iMul` b)
-
-
-
-instance IDom ITerm where
-    index b = Fix . I <$> newIndex b
-    iConst = Fix . IConst
-    iAdd a b = Fix (Add a b)
-    iSub a b = Fix (Sub a b)
-    iMul a b = Fix (Mul a b)
-    iDiv a b = Fix (Div a b)
-
     
 data Index = Index 
     { indexBound::Int
@@ -57,7 +35,7 @@ data IExpr i =
     | Div i i
     | IConst Int deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
 
-type ITerm = Fix IExpr
+type ITerm = TFix ID IExpr
 
 instance Show ITerm where
     show = unpack . showITerm
@@ -66,7 +44,7 @@ pprintID :: Index -> Doc ann
 pprintID i = pprintIDSimple i <> "<" <> (pretty . indexBound) i <> ">"
 
 pprintIDSimple :: Index -> Doc ann
-pprintIDSimple i = "i" <> (pretty . idInt . indexID) i
+pprintIDSimple i = "i" <> (pretty . unwrapID . indexID) i
 
 pprintIExpr :: IExpr (Doc ann) -> Doc ann
 pprintIExpr (I i) = pprintID i

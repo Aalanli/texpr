@@ -1,2 +1,6 @@
 .stack-work/
 *~
+.obsidian
+*.o
+*.ptx
+*.so

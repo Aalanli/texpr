@@ -33,7 +33,7 @@ tVar mem size = do
 -- Let P = computeParallel (the parallel loop)
 -- Let N = P * R           (the size of output)
 data ComputeAttr = ComputeAttr 
-    { computeWriteBackMap::IFunc -- [N] -> [N]
+    { computeWriteBackMap::Seq IFunc -- [[N] -> [N]] 1 write back func for each elem in tuple
     , computeMap::IFunc          -- [P, R] -> [N]
     , computeRepeats::Int 
     , computeParallel::Int
@@ -44,27 +44,40 @@ data ComputeAttr = ComputeAttr
 -- we can factor the reduction N = P * S, P parallel workers reducing
 -- S steps sequentially, and then doing a parallel reduction amongst the parallel workers.
 data ReduceAttr = ReduceAttr
-    { reduceMap::IFunc -- [P, S] -> [N]
+    { reduceMap::Seq IFunc -- [P, S] -> [N]
     , reduceParallel::Int
     , reduceSequential::Int
     , reduceIndex::Index
     } deriving (Show)
 
-data MemoryLevel = Reg | MemAddressable Int
+
+data MemoryLevel = Reg | MemAddressable | MemAddressableStrict Int
 
 instance Show MemoryLevel where
     show = renderString . layoutPretty defaultLayoutOptions . \case
         Reg -> "r"
-        MemAddressable i -> "L" <+> pretty i
+        MemAddressable -> "L?"
+        MemAddressableStrict i -> "L" <+> pretty i
 
 type OpCode = Text
 
+data IndexMask = IndexMask 
+    { indexMaskCond::Cond
+    , indexMaskDefault::Float }
+    deriving Show
+
 data TExpr2 e = 
     Compute ComputeAttr e
-    | Reduce ReduceAttr e
-    | Let TVar e e
-    | Index TVar ITerm
+    | Sequential Index e e -- i, init state, new state
+    | Let (Seq TVar) e e  -- unpack tuples, maybe lets should take a write back map instead of compute/reduce attr
+    -- if we let 'Let' have the index back map, potentially it could also represent the scatter op
+    -- in a lower level setting, let could be represented as a 'bind', in which
+    -- a particular buffer is bound to an expression for the duration of its execution
+    -- with write semantics. 
+    | Index TVar ITerm (Maybe IndexMask)
     | ElemWise Text (Seq e) -- TODO: add actual elemwise ops (not important for the optimizations we care about)
+    | TConst Float
+    | Tuple (Seq e)
     deriving (Functor, Foldable, Traversable, Show)
 
 type TTerm2 = Fix TExpr2
@@ -87,8 +100,15 @@ data TExpr3 e =
     | Write TVar ITerm TVar -- t[L i][n][e] = a[r][1]
     | Alloc TVar -- no need to alloc Read results (those can be left as virtual regs)
     | Synchronize
+    | CondStmt Cond e
     | ElemOp OpCode TVar (Seq TVar)
 
+data Cond = 
+    CondLE ITerm -- e < 0
+    | CondEQ ITerm -- e == 0
+    | CondAnd Cond Cond
+    | CondOr Cond Cond
+    | CondNot Cond deriving Show
 
 data CuKernel = CuKernel 
     { gridSize::Int

@@ -24,7 +24,8 @@ data IFunc = IFunc {
 makeIFunc :: IDEnv m => [Int] -> ([ITerm] -> ITerm) -> m IFunc
 makeIFunc shape f = do
     inds <- mapM newIndex shape
-    return $ IFunc (f (map (Fix . I) inds)) (fromList inds)
+    f' <- idFix
+    return $ IFunc (f (map (f' . I) inds)) (fromList inds)
 
 pprintIfunc :: IFunc -> Doc ann
 pprintIfunc (IFunc it ic) = let 
@@ -34,13 +35,13 @@ pprintIfunc (IFunc it ic) = let
 instance Show IFunc where
     show = unpack . renderStrict . layoutPretty defaultLayoutOptions . pprintIfunc
 
-(.+) :: IDom i => i -> i -> i
-a .+ b = iAdd a b
-(.-) :: IDom i => i -> i -> i
-a .- b = iSub a b
-(.*) :: IDom i => i -> i -> i
-a .* b = iMul a b
-(./) :: IDom i => i -> i -> i
-a ./ b = iDiv a b
-(.%) :: IDom i => i -> i -> i
-a .% b = iMod a b
+-- (.+) :: IDom i => i -> i -> i
+-- a .+ b = iAdd a b
+-- (.-) :: IDom i => i -> i -> i
+-- a .- b = iSub a b
+-- (.*) :: IDom i => i -> i -> i
+-- a .* b = iMul a b
+-- (./) :: IDom i => i -> i -> i
+-- a ./ b = iDiv a b
+-- (.%) :: IDom i => i -> i -> i
+-- a .% b = iMod a b

@@ -29,6 +29,7 @@ dependencies:
 - containers
 - vector
 - megaparsec
+- hashable
 
 ghc-options:
 - -Wall

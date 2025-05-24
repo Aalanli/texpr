@@ -1,4 +1,3 @@
-{-# LANGUAGE GeneralisedNewtypeDeriving #-}
 module IExpr.Parse where
 
 import Control.Monad.Trans
@@ -8,7 +7,6 @@ import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as Lex
 import Data.Text ( Text )
-import Control.Monad.Identity
 
 import IExpr.Internal
 import Util
@@ -38,14 +36,17 @@ pIndex = do
     lift $ newIndex width
 
 iexprFix :: (IDEnv m) => ParserT m ITerm
-iexprFix = Fix . IConst <$> lexeme Lex.decimal
-    <|> try (Fix . I <$> pIndex)
+iexprFix = (. IConst) <$> lift idFix <*> lexeme Lex.decimal
+    <|> try ((.I) <$> lift idFix <*> pIndex)
     <|> try (binop "+" Add)
     <|> try (binop "-" Sub)
     <|> try (binop "*" Mul)
     <|> try (binop "/" Div)
     where
-        binop c f = pParens (fmap Fix $ f <$> iexprFix <* symbol c <*> iexprFix )
+        binop c f = pParens $ do
+            p <- f <$> iexprFix <* symbol c <*> iexprFix
+            p' <- lift idFix
+            return (p' p)
 
 parseIExpr :: IDEnv m => Text -> m ITerm
 parseIExpr t = env
